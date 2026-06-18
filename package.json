@@ -1,0 +1,29 @@
+{
+  "name": "code-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "code-agent": "./dist/src/index.js",
+    "codeagent": "./dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test \"dist/tests/*.test.js\"",
+    "doctor": "node dist/src/index.js doctor",
+    "link:global": "npm run build && npm link",
+    "start": "node dist/src/index.js",
+    "docker:build": "docker compose build",
+    "docker:shell": "docker compose run --rm code-agent",
+    "docker:test": "docker compose run --rm code-agent npm test",
+    "docker:doctor": "docker compose run --rm code-agent node dist/src/index.js doctor"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

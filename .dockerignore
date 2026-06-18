@@ -1,0 +1,8 @@
+node_modules
+dist
+.git
+.env
+.code-agent/sessions
+*.log
+__pycache__
+*.pyc

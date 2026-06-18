@@ -1,0 +1,31 @@
+{
+  "defaultProfile": "ollama",
+  "profiles": {
+    "ollama": {
+      "provider": "openai-compatible",
+      "baseUrl": "http://192.168.1.105:11434/v1",
+      "apiKeyEnv": "OLLAMA_API_KEY",
+      "model": "qwen3.6:27b",
+      "useLlm": true
+    },
+    "deepseek": {
+      "provider": "openai-compatible",
+      "baseUrl": "https://api.deepseek.com",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "model": "deepseek-v4-pro",
+      "useLlm": true
+    }
+  },
+  "useLlm": true,
+  "permissionMode": "workspace-write",
+  "llmTimeoutMs": 120000,
+  "ui": {
+    "dialogBlocks": true,
+    "showTokenUsage": true,
+    "thinkingDisplay": "summary",
+    "summaryMode": "auto",
+    "terminalMode": "tui"
+  },
+  "contextCompression": "local",
+  "headroomBaseUrl": "http://localhost:8787"
+}

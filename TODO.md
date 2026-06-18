@@ -1,0 +1,206 @@
+# TODO
+
+- Prepared the GitHub publish commit for `garbageofmanufacture/codeagent`: removed `.code-agent/` runtime state, CCR caches, checkpoints, temp files, personal text files, and empty `test.py` from git tracking; expanded `.gitignore` so secrets and generated runtime data stay local.
+- Moved provider keys to local `.env`: `.code-agent.json` now uses `apiKeyEnv` for Ollama and DeepSeek, while `.env` stores local `OLLAMA_API_KEY` and `DEEPSEEK_API_KEY`.
+- Expanded `.gitignore` to ignore `.env`, `.env.*`, local settings, sessions, transcripts, caches, logs, Python caches, and common private key/certificate files.
+- Updated `.env.example` to show environment-variable based provider keys without committing real secrets.
+- Added provider thinking/reasoning display support inspired by Claw: `src/core/llm.ts` now recognizes OpenAI-compatible `reasoning_content`, `reasoning`, `thinking.content`, and Qwen-style `<think>...</think>` blocks, removes them from visible assistant text, and emits folded thinking metadata.
+- Updated `src/core/runtime.ts`, `src/cli/trace.ts`, and `src/cli/repl.ts` so terminal output shows a collapsed `Thinking` trace line while keeping hidden reasoning text out of normal output.
+- Added `thinkingDisplay` configuration through `.code-agent.json`, env (`CODE_AGENT_THINKING_DISPLAY`), CLI (`--thinking off|summary|verbose`), and slash command (`/thinking off|summary|verbose`).
+- Updated `README.md`, `ARCHITECTURE.md`, `.env.example`, `.code-agent.json`, and tests to document and validate the thinking display behavior.
+
+This file is the project change ledger. Every implementation batch records the files written or modified and the reason.
+
+## 2026-06-18
+
+- Refined slash menu filtering in `src/cli/slashMenu.ts` so command id/label prefixes rank ahead of descriptions; `/s` now surfaces `status`, `session`, `sessions`, `skills`, and `settings` instead of unrelated entries whose descriptions merely contain `s`.
+- Added root-level `status`, `session`, and `sessions` menu entries plus `tests/slashMenu.test.ts` coverage for single-letter slash filtering, and verified with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Fixed slash menu selection movement in `src/cli/slashMenu.ts` by preserving `selectedIndex` across redraws when the typed filter has not changed; `/model` submenus now keep Up/Down selection instead of jumping back to the first row.
+- Added `tests/slashMenu.test.ts` coverage for redraw-preserved selection, and verified with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Updated `src/cli/trace.ts` so simple fallback answers no longer display internal `Prompt/Routed matches/Tool observations` diagnostics; normal UI now shows a concise model-unavailable notice when the LLM call fails.
+- Updated `src/cli/slashMenu.ts` and `src/cli/repl.ts` so the slash command palette exposes root-level `model` and `profile` entries, builds profile/model choices from the active config, and submits leaf commands with Enter instead of only filling the input line.
+- Added regression coverage in `tests/trace.test.ts` and `tests/slashMenu.test.ts` for friendly fallback rendering and `/mo -> model -> deepseek` style dynamic menu selection.
+- Verified this slash/fallback fix with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Fixed streaming Agent block rendering in `src/cli/repl.ts` so the first streamed token starts below the `Agent` header instead of being appended to the border line.
+- Added `llmTimeoutMs` support in `src/core/types.ts`, `src/core/config.ts`, and `src/core/llm.ts` so stalled OpenAI-compatible/Anthropic requests abort and return a visible `LLM unavailable` message instead of leaving the REPL busy indefinitely.
+- Updated `src/core/runtime.ts` so model-identity questions answer with the configured `provider:model` instead of only describing the assistant role.
+- Updated `src/core/tasks.ts` so incomplete Plan/Todo state is only resumed for complex or explicit continue/task prompts, preventing simple chat from showing stale `计划任务已更新。` summaries.
+- Updated `.code-agent.json`, `.env.example`, and `README.md` with `llmTimeoutMs` / `CODE_AGENT_LLM_TIMEOUT_MS`, and corrected DeepSeek to use `apiKeyEnv: "DEEPSEEK_API_KEY"` instead of storing a key-like value in the project config.
+- Added runtime/task/terminal UI regression coverage for LLM timeout recovery, simple chat not resuming stale plans, and streamed Agent content starting on its own line.
+- Verified this fix with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+
+## 2026-06-17
+
+- Added `src/cli/terminalBlocks.ts` and updated `src/cli/trace.ts`, `src/cli/render.ts`, and `src/cli/repl.ts` so user prompts render as distinct `You` blocks, final assistant answers render as `Agent` blocks, and tool traces/diffs/tests remain outside the answer block.
+- Updated `src/core/llm.ts`, `src/core/runtime.ts`, `src/core/session.ts`, `src/core/types.ts`, and `src/cli/trace.ts` so each turn records provider usage when available, estimates usage otherwise, marks estimated usage explicitly, and renders a per-turn `Tokens:` line that can be disabled.
+- Added `src/core/summaryPolicy.ts` and updated runtime/rendering so `summary=auto` suppresses the large template for simple answers/read/list turns while showing brief summaries for edits, tests, failures, Plan/Todo, Python execution, and Git/change operations; `summary=off|always` are configurable.
+- Added `src/cli/clipboard.ts` and `src/cli/copyManager.ts`, expanded `src/cli/transcript.ts`, and updated `src/cli/repl.ts` / `src/cli/terminalUi.ts` with `/copy last|turn|all|selection|transcript|save`, plain-text history extraction, clipboard fallbacks, and `terminalMode=scrollback` startup behavior for native selection.
+- Updated `src/core/config.ts`, `src/cli/args.ts`, `src/cli/slash.ts`, `src/cli/slashMenu.ts`, `src/cli/banner.ts`, `.code-agent.json`, `.env.example`, `README.md`, and `ARCHITECTURE.md` with UI config (`dialogBlocks`, `showTokenUsage`, `summaryMode`, `terminalMode`), CLI flags, slash commands, and copy/scrollback documentation.
+- Added `tests/copyManager.test.ts` and `tests/summaryPolicy.test.ts`, and updated config/CLI/slash/runtime/terminal/trace tests for dialog blocks, token usage display, summary policy, copy commands, plain history extraction, and scrollback mode.
+- Verified the terminal UX optimization batch with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Added `src/core/pythonRunner.ts` and `src/tools/pythonTools.ts` for workspace-bound Python execution, temp script writing under `.code-agent/tmp/`, timeout handling, structured stdout/stderr/error summaries, latest-result storage, temp cleanup, and Python risk checks for sensitive paths, network modules, subprocess, and obvious unbounded loops.
+- Updated `src/tools/registry.ts`, `src/core/planner.ts`, `src/core/runtime.ts`, and `src/cli/trace.ts` so Python tools are available to runtime/planner/MCP, are rendered as natural terminal summaries, and can participate in the existing tool/result loop without treating Python script failures as registry crashes.
+- Added `src/cli/slashMenu.ts` and updated `src/cli/terminalUi.ts` / `src/cli/repl.ts` with a multi-level slash command menu for tools, files, git, python, memory, rag, tasks, skills, settings, and help; Up/Down, Enter, Tab, Backspace, and Esc are handled without breaking the fixed-bottom composer.
+- Added `src/core/reflectionPolicy.ts` and updated `src/core/runtime.ts` so simple turns skip reflection, file changes and validation run light reflection, and failures, blocked plans, risky work, or explicit review requests run full reflection; verbose mode can still show the policy decision.
+- Added `src/core/skills.ts`, `src/tools/skillTools.ts`, and built-in `SKILL.md` templates under `src/skills/builtin/` for `python-data-analysis`, `project-structure-review`, `test-fix-loop`, `terminal-ui-polish`, and `git-change-review`; `/skills init` can copy them into `.code-agent/skills/`.
+- Updated `src/cli/slash.ts` and `src/cli/repl.ts` with `/python run|exec|last|clean` and `/skills list|search|use|read|create|reload|init`, all routed through the normal registry permission and risk checks.
+- Updated `src/core/types.ts`, `README.md`, and `ARCHITECTURE.md` with loaded skill/reflection decision summary fields, Python execution loop documentation, multi-level slash menu behavior, selective reflection, Skills versus Memory/RAG/Goals/Tasks boundaries, and module ownership.
+- Added `tests/pythonRunner.test.ts`, `tests/skills.test.ts`, `tests/reflectionPolicy.test.ts`, and `tests/slashMenu.test.ts`, and updated `tests/runtime.test.ts`, `tests/slash.test.ts`, `tests/terminalUi.test.ts`, and `tests/trace.test.ts` for Python execution, Skills loading/search/init, selective reflection, menu navigation, new slash commands, fixed composer compatibility, and natural trace rendering.
+- Verified the Python execution, multi-level slash menu, selective reflection, and Skills batch with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Added provider profile support in `src/core/config.ts` and `src/core/types.ts`, including `defaultProfile`, named `profiles`, `apiKeyEnv`, `CODE_AGENT_PROFILE`, and `--profile` startup selection.
+- Updated `src/cli/slash.ts`, `src/cli/repl.ts`, `src/cli/banner.ts`, and `src/cli/render.ts` with `/profile [list|current|name]`, current profile status, and REPL switching that preserves the active session while changing provider/base URL/model/API key source.
+- Updated `.code-agent.json` with `ollama` and `deepseek` profiles; DeepSeek uses `https://api.deepseek.com`, `deepseek-v4-flash`, and `DEEPSEEK_API_KEY` instead of storing a real key in the project file.
+- Updated `.env.example`, `README.md`, and `ARCHITECTURE.md` with profile switching, DeepSeek OpenAI-compatible configuration, and secret handling guidance.
+- Added `tests/config.test.ts` and updated `tests/cli.test.ts` / `tests/slash.test.ts` for profile loading, `apiKeyEnv`, explicit endpoint override behavior, `--profile`, and `/profile` parsing.
+- Verified the provider profile switching batch with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Added `src/core/symbolIndex.ts` and `src/core/codeAnalyzer.ts` for cached code semantic indexing, TypeScript/JavaScript symbol extraction through the TypeScript Compiler API, first-pass Python parsing, definition/reference lookup, import/export analysis, code outlines, and simple call graph generation.
+- Added `src/tools/codeIntelTools.ts` and updated `src/tools/registry.ts` / `src/core/planner.ts` / `src/core/runtime.ts` so `symbol_index`, `symbol_search`, `find_definition`, `find_references`, `analyze_imports`, `call_graph`, and `code_outline` are available to runtime, planner, and MCP.
+- Added `src/core/projectInit.ts` and `src/tools/initTools.ts`; `/init` now generates `.code-agent/project.md`, `.code-agent/rules.md`, and `.code-agent/commands.md` from detected project commands, directory structure, semantic index results, protected paths, task workflows, and risk points.
+- Added `src/core/contextMonitor.ts`, `src/core/resumeState.ts`, and `src/tools/contextMonitorTools.ts`; `/context`, `/tokens`, `/cost`, and enhanced `/resume` now expose context pressure, token/cost estimates, CCR cache count, goals, plan state, changed files, commands, validation status, blockers, and next steps.
+- Updated `src/core/types.ts`, `src/cli/slash.ts`, `src/cli/repl.ts`, `src/cli/banner.ts`, and `src/cli/trace.ts` with Stage 3 types, slash commands, terminal summaries for semantic/init/context/resume tools, and final reports that include task goal, plan, semantic evidence, diff summary, validation, context usage, recoverable state, and next-step guidance.
+- Added `tests/symbolIndex.test.ts`, `tests/projectInit.test.ts`, `tests/contextMonitor.test.ts`, and `tests/resumeState.test.ts`, and updated `tests/slash.test.ts` / `tests/trace.test.ts` to cover semantic indexing, `/init` generated docs, context monitoring, long-term resume state, new slash commands, and enhanced final summaries.
+- Updated `README.md` and `ARCHITECTURE.md` with code intelligence, `/init`, context/token/cost monitoring, long-term resume behavior, module boundaries, and final report structure.
+- Verified the code intelligence, `/init`, context monitor, and long-term resume batch with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Added `src/core/tasks.ts` for persisted Plan/Todo execution state under `.code-agent/tasks/`, including task ids, statuses, reasons, evidence, resume support, and automatic status updates from tool observations.
+- Added `src/core/projectDetector.ts` and `src/core/commandProfile.ts` to detect Node, Python, Make, Rust, and Maven projects and infer `typecheck`, `test`, `lint`, `build`, and `dev` commands into `.code-agent/project-profile.json`.
+- Added `src/core/errorParser.ts` and `src/core/testRunner.ts` for structured TypeScript/npm/Python error parsing and a Test-Fix Loop that retries planner repair actions up to 3 times before reporting blocked/failed validation.
+- Added `src/tools/taskTools.ts`, `src/tools/projectTools.ts`, and `src/tools/testTools.ts`, and updated `src/tools/registry.ts` so task plans, project command profiles, validation plans, and error parsing are available to runtime, planner, and MCP through the normal safety path.
+- Updated `src/core/runtime.ts` so complex turns create or resume plans, tool executions update task state, file mutations trigger inferred validation commands through the existing shell tool, failed validation can feed the planner for repair, and final turn summaries include plan/validation state.
+- Updated `src/core/planner.ts`, `src/cli/slash.ts`, `src/cli/repl.ts`, `src/cli/banner.ts`, and `src/cli/trace.ts` with task/project/validation routing, `/plan`, `/todo`, `/task add|done|block|reset`, `/resume-task`, task rendering, and richer final summaries.
+- Added `tests/tasks.test.ts`, `tests/projectCommands.test.ts`, `tests/errorParser.test.ts`, and `tests/testRunner.test.ts`, and updated `tests/slash.test.ts` to cover automatic plan creation, task status progression, resume-task, project command inference, error parsing, Test-Fix Loop retry limits, no-command warnings, and slash parsing.
+- Updated `README.md` and `ARCHITECTURE.md` with the Plan/Todo system, project command profile, automatic validation/Test-Fix Loop behavior, slash commands, and module boundaries.
+- Verified the Plan/Todo and Test-Fix Loop batch with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Added `src/cli/markdownRenderer.ts` for lightweight terminal Markdown rendering of headings, lists, inline code, bold text, fenced code blocks, quotes, horizontal rules, links, and simple tables.
+- Updated `src/core/types.ts`, `src/core/config.ts`, `src/cli/args.ts`, `src/cli/slash.ts`, `src/cli/repl.ts`, `src/cli/render.ts`, `src/cli/trace.ts`, `src/cli/terminalUi.ts`, and `src/index.ts` so Markdown rendering is enabled by default for TTY final answers/summaries, disabled for JSON/non-TTY output, and switchable with `--no-markdown` and `/markdown on|off`.
+- Added `tests/markdownRenderer.test.ts` and updated `tests/cli.test.ts`, `tests/slash.test.ts`, `tests/trace.test.ts`, and `tests/terminalUi.test.ts` to cover Markdown elements, raw output mode, JSON no-ANSI behavior, and fixed-bottom composer compatibility with ANSI Markdown.
+- Updated `README.md` and `ARCHITECTURE.md` with the terminal Markdown rendering behavior, enable/disable rules, and rendering-layer boundaries.
+- Verified the terminal Markdown batch with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Added `src/core/changeTracker.ts` for per-turn checkpoints, before/after file hashing, current-change summaries, and same-turn rollback that skips files changed by the user after the agent write.
+- Added `src/tools/gitTools.ts` with Git status, Git diff, commit-message draft, checkpoint creation, change summary, revert, and command-risk helper tools.
+- Updated `src/core/security.ts`, `src/tools/fileTools.ts`, `src/core/rag.ts`, `src/core/session.ts`, `src/core/memory.ts`, and `src/core/headroom.ts` so dangerous commands, sensitive paths, session logs, memory, RAG, and CCR caches are guarded or redacted.
+- Updated `src/tools/registry.ts` and `src/core/runtime.ts` so shell risk checks, sensitive read blocking, automatic per-turn checkpoints, and before/after mutation tracking run through the shared tool execution path.
+- Updated `src/cli/slash.ts`, `src/cli/repl.ts`, and `src/cli/trace.ts` with `/diff`, `/changes`, `/checkpoint`, `/revert`, `/commit-msg`, and `/risk <command>` rendering.
+- Added `tests/security.test.ts`, `tests/changeTracker.test.ts`, and `tests/gitTools.test.ts`, and updated `tests/slash.test.ts` for risk classification, redaction, sensitive-read blocking, checkpoint/revert behavior, Git diff tooling, and new slash command parsing.
+- Updated `README.md` and `ARCHITECTURE.md` to document Git/Diff/checkpoint/revert commands, command risk categories, secret redaction, and the new safety/change-tracking module boundaries.
+- Verified the Git/Diff/revert/safety batch with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Added `src/cli/compact.ts` with `compactTerminalOutput(...)` for line/character capped terminal output that preserves errors, paths, test failures, and diff hunks.
+- Added `src/cli/transcript.ts` so REPL sessions retain full uncompressed turn transcripts and can render or save them under `.code-agent/transcripts/`.
+- Reworked `src/cli/trace.ts` so normal mode hides internal route/coordinator/planner/reflection/memory/RAG logs and renders natural tool summaries for reads, lists, searches, shell commands, and file diffs; verbose mode still shows detailed `Running`/`Ran` trace events.
+- Updated `src/core/types.ts` and `src/core/runtime.ts` so tool trace events include observable tool input/output for display and transcript rendering without exposing hidden prompts or chain-of-thought.
+- Updated `src/tools/fileTools.ts` so shell stdout/stderr are preserved in full for transcripts; UI compaction now happens only at the rendering layer.
+- Updated `src/core/config.ts`, `src/cli/args.ts`, `src/cli/slash.ts`, and `src/cli/repl.ts` to support `--verbose`, `CODE_AGENT_VERBOSE=1`, `/verbose on|off`, `/transcript [all|save]`, and Ctrl+T transcript viewing without changing the fixed-bottom composer behavior.
+- Updated `src/cli/render.ts` and `src/index.ts` so non-interactive `prompt` text output also respects normal versus verbose trace rendering while JSON output remains machine-readable.
+- Updated `tests/trace.test.ts`, `tests/compact.test.ts`, `tests/transcript.test.ts`, `tests/cli.test.ts`, and `tests/slash.test.ts` to cover normal/verbose trace rendering, long-output compaction, error preservation, diff truncation, final summaries, transcript viewing/saving, and verbose command parsing.
+- Updated `README.md` and `ARCHITECTURE.md` with the normal/verbose output modes, transcript commands, Ctrl+T behavior, and compact output strategy.
+- Verified this batch with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Updated `src/cli/terminalUi.ts` with a scrollable history viewport above the fixed composer, including bottom anchoring, page scrolling, top/bottom jumps, and stable behavior while new output arrives.
+- Updated `src/cli/repl.ts` so TTY sessions can scroll conversation output with `Up`, `Down`, `PageUp`, `PageDown`, `Home`, and `End`.
+- Updated `tests/terminalUi.test.ts` with regression coverage for scrolling older history and returning to the latest output.
+- Verified this batch with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Updated `src/cli/terminalUi.ts` so alternate-screen/cursor setup is written once per TTY session instead of during every render, preventing repeated full-screen blocks from piling up in Windows Terminal scrollback.
+- Updated `src/core/router.ts` and `src/tools/registry.ts` so Chinese prompts such as `帮我分析这个项目结构` route to `list_dir` before the model answers, letting the agent inspect the local workspace instead of claiming it cannot read files.
+- Updated `tests/router.test.ts` and `tests/terminalUi.test.ts` with regressions for project-structure routing and repeated TUI setup sequences.
+- Verified this batch with `npm run typecheck`, `npm test`, `python -m py_compile py\agent_bridge.py`, `node dist/src/index.js --output-format json route "帮我分析这个项目结构"`, and `node dist/src/index.js --no-llm --output-format json prompt "帮我分析这个项目结构"`.
+
+## 2026-06-16
+
+- Added `src/core/goals.ts` and persisted optional session goals so each turn can derive active goals, mark them running, update them from tool observations, and expose `/goals`.
+- Added `src/core/reflection.ts` for structured reviewer reports (`pass`, `revise`, `blocked`) with concise observable issues, next actions, and lessons.
+- Added `src/core/memory.ts` plus `src/tools/memoryTools.ts` so project memory is persisted under `.code-agent/memory/project.jsonl`, searched with `memory_search`, and written with `memory_write`.
+- Added `src/core/recovery.ts` so common tool failures can trigger fallback actions such as missing-file `list_dir` and `glob_search` recovery.
+- Added `src/core/rag.ts` plus `src/tools/ragTools.ts` so the workspace can be indexed into `.code-agent/rag/index.json` and searched with `rag_search`.
+- Updated `src/core/runtime.ts` to load memory/RAG context, start goals, pass context into coordinator/planner/final prompts, execute recovery actions, run reflection, and write learned memory entries.
+- Updated `src/tools/registry.ts`, `src/core/router.ts`, and `src/core/planner.ts` so `memory_search`, `memory_write`, `rag_index`, and `rag_search` are normal tools available to the model and MCP server.
+- Updated `src/cli/slash.ts`, `src/cli/repl.ts`, and `src/cli/banner.ts` with `/goals`, `/memory [query]`, `/rag index [path]`, and `/rag search <query>`.
+- Added tests for goals, memory, RAG, recovery, reflection, new slash commands, runtime goal updates, and memory/RAG routing.
+- Updated `README.md` and `ARCHITECTURE.md` to document the aaagge-inspired goal, reflection, memory, recovery, and RAG loops.
+- Verified this batch with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Added `src/core/planner.ts` coordinator/planner prompts so the runtime follows an aaagge-style classify -> coordinate -> ReAct tool-action loop instead of hardcoded write-task handling.
+- Reworked `src/core/runtime.ts` to remove hardcoded generated file content, save model-planned `tool_use` blocks, execute tool actions, append `tool_result` observations, and continue planning until completion.
+- Updated `tests/runtime.test.ts` and `tests/planner.test.ts` to verify model-planned `write_file` actions, coordinator route parsing, and that `--no-llm` no longer fabricates generated code.
+- Added `src/core/headroom.ts` with local Headroom-inspired CCR compression for large tool results, plus retrievable `.code-agent/ccr` cache entries.
+- Added `src/tools/contextTools.ts` and registered `ccr_retrieve` so compressed tool outputs can be recovered by the model or through MCP.
+- Added `src/tools/webTools.ts` and registered `fetch_url` and `web_search`; `web_search` supports Baidu AI Search through `BAIDU_AI_SEARCH_API_KEY` or `CODE_AGENT_WEB_SEARCH_API_KEY`.
+- Updated `src/core/router.ts` and `src/core/planner.ts` with internet-search routing and candidate tools.
+- Refined `src/core/router.ts` so normal prompts containing words like `MCP` no longer let command matches outrank tool intent, and `上网搜索/latest/current` prompts route to `web_search` first without duplicate matches.
+- Added `src/mcp/server.ts` and CLI action `mcp-server`/`mcp` so registered tools are exposed through MCP stdio `tools/list` and `tools/call`.
+- Updated `src/cli/args.ts`, `src/cli/render.ts`, `src/core/catalog.ts`, `src/core/config.ts`, `src/core/types.ts`, `.code-agent.json`, `.env.example`, and `package.json` for context compression flags, `codeagent` global bin alias, MCP command, and Headroom settings.
+- Updated `src/cli/slash.ts`, `src/cli/terminalUi.ts`, and `src/cli/repl.ts` so typing `/` shows a bottom command palette and `Tab` completes the first slash command suggestion.
+- Hardened `src/tools/fileTools.ts` so tool implementations enforce workspace path boundaries even if called outside the registry.
+- Added `tests/headroom.test.ts`, `tests/mcp.test.ts`, and expanded CLI/router/slash/terminal tests for CCR, MCP, web routing, global command parsing, and slash suggestions.
+- Updated `README.md` and `ARCHITECTURE.md` with model-driven tool calling, MCP server usage, web-search configuration, global `codeagent` install, and Headroom/CCR context compression behavior.
+- Synced `package-lock.json` after adding the `codeagent` bin alias.
+- Verified this batch with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Added `docs/superpowers/specs/2026-06-16-repl-workflow-trace-design.md` for the selected option B terminal command box and auditable workflow trace design.
+- Updated `src/core/types.ts` and `src/core/runtime.ts` so each turn can return route, tool, LLM, and session-save trace events.
+- Created `src/cli/trace.ts` and updated `src/cli/repl.ts` to render Codex-style command boxes, `Running`/`Ran` process logs, final answers, and model/workspace footers.
+- Updated `src/core/runtime.ts` and `src/cli/repl.ts` so interactive traces stream live through an `onTrace` callback instead of appearing only after the turn finishes.
+- Updated `tests/runtime.test.ts` and added `tests/trace.test.ts` to verify runtime trace collection and REPL trace rendering.
+- Updated `README.md` and `ARCHITECTURE.md` to document the selected option B workflow trace UI and clarify that trace logs are auditable runtime events, not hidden chain-of-thought.
+- Verified option B with `npm run typecheck`, `npm test`, `python -m py_compile py\agent_bridge.py`, and a REPL smoke test using `read README.md` plus `/exit`.
+- Created `src/cli/terminalUi.ts` and updated `src/cli/repl.ts` so real TTY sessions use a Codex CLI-style fixed bottom input box with scrollback/log output above it.
+- Added `tests/terminalUi.test.ts` for composer input box rendering and long-input tail preservation.
+- Updated `README.md` and `ARCHITECTURE.md` to clarify that fixed-bottom composer mode applies to real TTY sessions, while pipes and scripts keep plain line-mode output.
+- Updated `.gitignore` to ignore `.superpowers/` visual brainstorming preview files.
+- Verified fixed-bottom composer changes with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
+- Updated `src/core/llm.ts`, `src/core/runtime.ts`, `src/cli/repl.ts`, and `src/cli/terminalUi.ts` so OpenAI-compatible/Ollama responses can stream token deltas live above the fixed composer instead of appearing only after completion.
+- Updated `tests/terminalUi.test.ts` to verify streamed text is rendered above the fixed composer.
+- Updated `src/cli/terminalUi.ts` and `src/cli/repl.ts` with a Claw-inspired `Working ... elapsed` status line above the fixed composer while LLM/content-generation calls are in flight.
+- Updated `src/core/runtime.ts` and `src/core/router.ts` so write/create/save prompts generate file content and execute `write_file` directly instead of trying to read/list a nonexistent target file first.
+- Updated `tests/router.test.ts`, `tests/runtime.test.ts`, and `tests/terminalUi.test.ts` to cover write-intent routing, generated file writes, and the Working status line.
+- Updated `README.md` and `ARCHITECTURE.md` to document Claw-inspired streaming, Working status, and write/create/save file-generation behavior.
+- Verified the original Chinese N-Queens save prompt in a temporary workspace; it now creates `TEST.py` with C code instead of attempting to read/list a missing target file.
+- Added `docs/superpowers/specs/2026-06-16-interactive-repl-design.md` to lock the approved interactive REPL, slash command, and context compression design before implementation.
+- Created `src/core/context.ts` for session-level context compression and active-message usage estimation.
+- Created `src/cli/slash.ts` for interactive slash command parsing, aliases, help metadata, and `/compact` keep-count validation.
+- Created `src/cli/banner.ts` for the interactive ASCII banner, status panel, session summaries, session lists, and compaction reports.
+- Created `src/cli/repl.ts` for the readline-based interactive shell, normal prompt turns, slash command dispatch, session resume, model/provider/permission switching, clear, and exit handling.
+- Refined `src/cli/repl.ts` to use readline async iteration so interactive commands also work with piped input and Docker smoke tests.
+- Updated `src/cli/repl.ts` to show prompts only in real TTY sessions so piped input cannot call `prompt()` after readline closes.
+- Updated `src/core/runtime.ts` with public current-session access, explicit session resume, and context compaction support.
+- Updated `src/core/types.ts`, `src/cli/args.ts`, `src/index.ts`, `src/cli/render.ts`, and `src/core/catalog.ts` so no-argument startup and `interactive`/`repl` launch the REPL.
+- Created `tests/slash.test.ts`, `tests/context.test.ts`, and `tests/cli.test.ts` for slash command parsing, context compaction, and interactive entrypoint parsing.
+- Updated `README.md` with interactive shell startup, Docker usage, slash commands, and `/compact` behavior.
+- Updated `ARCHITECTURE.md` with the interactive layer and context compression responsibilities.
+- Verified the interactive layer with `npm run typecheck`, `npm test`, `python -m py_compile py\agent_bridge.py`, `/status` plus `/exit` smoke input, and normal prompt plus `/compact 1` smoke input.
+- Created `.code-agent.json` to enable the local Ollama OpenAI-compatible provider with `qwen3:8b`, `useLlm: true`, and `workspace-write` permissions.
+- Updated `src/core/router.ts`, `src/tools/registry.ts`, and `src/core/runtime.ts` so Chinese local-file prompts route to workspace tools and the LLM is instructed not to claim it cannot read workspace files.
+- Updated `tests/router.test.ts` with Chinese local file routing coverage for capability questions and path-based read requests.
+- Verified Chinese local-file routing with `npm run typecheck`, `npm test`, `node dist/src/index.js --output-format json route "你可以阅读我本地的文件吗"`, and `node dist/src/index.js --no-llm prompt "你可以阅读我本地的文件吗"`.
+- Created `TODO.md` as the required change ledger.
+- Created `docs/design.md` to lock the project-development architecture before implementation.
+- Created `package.json`, `tsconfig.json`, and `.env.example` for the TypeScript project scaffold.
+- Created `src/core/types.ts` with shared CLI, runtime, tool, permission, and session types.
+- Created `src/core/catalog.ts` for command metadata.
+- Created `src/core/config.ts` for env/config-file loading and runtime defaults.
+- Created `src/cli/args.ts` for typed CLI argument parsing.
+- Created `src/core/pathScope.ts` for workspace path boundary validation.
+- Created `src/core/permissions.ts` for permission-mode authorization.
+- Created `src/utils/json.ts` for JSON payload parsing/rendering helpers.
+- Created `src/tools/fileTools.ts` with real workspace-scoped read/write/edit/list/glob/grep/shell implementations.
+- Created `src/tools/registry.ts` with tool metadata, permission checks, and dispatch.
+- Created `src/core/router.ts` for command/tool prompt routing.
+- Created `src/core/session.ts` for durable workspace-bound session persistence.
+- Created `src/core/llm.ts` for optional OpenAI-compatible/Ollama chat completion calls.
+- Created `src/core/runtime.ts` for the Rust-inspired turn loop, bootstrap report, inferred safe tool execution, and explicit tool execution.
+- Created `src/cli/render.ts` for text, JSON, Markdown, help, and turn-summary rendering.
+- Created `src/index.ts` as the CLI entrypoint with unified command dispatch and error handling.
+- Created `py/agent_bridge.py` as an optional Python bridge for local Ollama/OpenAI-compatible chat calls.
+- Created `tests/router.test.ts` for routing behavior.
+- Created `tests/permissions.test.ts` for workspace scope and permission enforcement.
+- Created `tests/runtime.test.ts` for turn execution and session persistence.
+- Updated provider configuration to support both OpenAI-compatible providers and Anthropic, with Ollama only as the local default.
+- Updated `py/agent_bridge.py` to support generic `CODE_AGENT_*`, OpenAI-compatible providers, and Anthropic.
+- Created `README.md` with setup, provider, permission, command, and verification instructions.
+- Created `ARCHITECTURE.md` with runtime layers, provider strategy, and safety strategy.
+- Updated `docs/design.md` to clarify multi-provider support instead of an Ollama-only design.
+- Corrected file placement so all project files live under `E:\学习文档\智能体相关学习资料\code agent`.
+- Generated `package-lock.json` via `npm install`.
+- Fixed `src/core/pathScope.ts` strict optional typing and primary-root handling after typecheck.
+- Updated `package.json` test script to run compiled `dist/tests/*.test.js` files explicitly on Windows.
+- Fixed `src/index.ts` doctor path resolution so compiled CLI checks the project-level Python bridge.
+- Created `.gitignore` for dependencies, build output, local env files, sessions, and Python caches.
+- Created `Dockerfile`, `docker-compose.yml`, and `.dockerignore` for Docker-level sandbox execution.
+- Created `docs/sandbox.md` with Docker sandbox build, test, shell, and provider instructions.
+- Added Docker convenience scripts to `package.json`.
+- Updated `README.md` with Docker sandbox usage.

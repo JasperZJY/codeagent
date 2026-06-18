@@ -1,0 +1,31 @@
+services:
+  code-agent:
+    build:
+      context: .
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      CODE_AGENT_PROVIDER: ${CODE_AGENT_PROVIDER:-openai-compatible}
+      CODE_AGENT_BASE_URL: ${CODE_AGENT_BASE_URL:-http://host.docker.internal:11434/v1}
+      CODE_AGENT_API_KEY: ${CODE_AGENT_API_KEY:-ollama}
+      CODE_AGENT_MODEL: ${CODE_AGENT_MODEL:-qwen3:8b}
+      CODE_AGENT_PERMISSION_MODE: ${CODE_AGENT_PERMISSION_MODE:-workspace-write}
+      CODE_AGENT_OUTPUT_FORMAT: ${CODE_AGENT_OUTPUT_FORMAT:-text}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+    volumes:
+      - .:/workspace
+      - code-agent-node-modules:/workspace/node_modules
+
+volumes:
+  code-agent-node-modules:
