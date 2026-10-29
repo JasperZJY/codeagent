@@ -11,6 +11,7 @@ The project follows the runtime split used by the Rust codebase while keeping th
 - Config and provider resolution: `src/core/config.ts`
 - Routing: `src/core/router.ts`
 - Sessions and context compression: `src/core/session.ts`, `src/core/context.ts`, `src/core/headroom.ts`
+- Harness core: `src/core/harness.ts`, `src/core/agentLoop.ts`, `src/core/toolPipeline.ts`, `src/core/hooks.ts`, `src/core/contextPipeline.ts`
 - Project intelligence loops: `src/core/goals.ts`, `src/core/reflection.ts`, `src/core/reflectionPolicy.ts`, `src/core/memory.ts`, `src/core/recovery.ts`, `src/core/rag.ts`, `src/core/skills.ts`
 - Python execution loop: `src/core/pythonRunner.ts`
 - Plan/Todo and validation: `src/core/tasks.ts`, `src/core/projectDetector.ts`, `src/core/commandProfile.ts`, `src/core/errorParser.ts`, `src/core/testRunner.ts`
@@ -18,8 +19,9 @@ The project follows the runtime split used by the Rust codebase while keeping th
 - Code intelligence and recovery state: `src/core/symbolIndex.ts`, `src/core/codeAnalyzer.ts`, `src/core/projectInit.ts`, `src/core/contextMonitor.ts`, `src/core/resumeState.ts`
 - Permissions, path scope, and safety: `src/core/permissions.ts`, `src/core/pathScope.ts`, `src/core/security.ts`
 - Change checkpoints: `src/core/changeTracker.ts`
-- Runtime loop: `src/core/runtime.ts`
+- Runtime facade: `src/core/runtime.ts`
 - Tool registry and implementations: `src/tools/registry.ts`, `src/tools/fileTools.ts`, `src/tools/gitTools.ts`, `src/tools/pythonTools.ts`, `src/tools/skillTools.ts`, `src/tools/taskTools.ts`, `src/tools/projectTools.ts`, `src/tools/testTools.ts`, `src/tools/codeIntelTools.ts`, `src/tools/initTools.ts`, `src/tools/contextMonitorTools.ts`
+- Future harness boundaries: `src/core/backgroundTasks.ts`, `src/core/mcpToolAdapter.ts`, `src/core/subagents.ts`, `src/core/worktreeManager.ts`
 - MCP stdio server: `src/mcp/server.ts`
 - Optional Python provider bridge: `py/agent_bridge.py`
 
@@ -27,20 +29,34 @@ The project follows the runtime split used by the Rust codebase while keeping th
 
 1. Parse global flags and subcommand into a typed CLI action.
 2. Load `.env`, `.code-agent.json`, `.code-agent/settings.json`, and explicit overrides.
-3. Build `AgentRuntime` with workspace root, provider, model, permissions, and output format.
+3. Build `AgentRuntime` with workspace root, provider, model, permissions, and output format; it owns an `AgentHarness` for loop, context, hooks, and tool execution.
 4. Append the user message to the session.
 5. Route the prompt to command/tool candidates.
-6. Load relevant durable memory, local RAG snippets, and any explicitly matching skill workflows, then create active goals for the turn.
+6. `ContextPipeline` loads relevant durable memory, local RAG snippets, and matching skill catalog entries, then creates active goals for the turn. Full skill workflows are loaded only through skill tools.
 7. If the request is complex or an unfinished plan exists, create or resume a persisted Plan/Todo file under `.code-agent/tasks/`.
 8. When LLM use is enabled, run a coordinator prompt to classify the request and choose a workflow strategy.
-9. Create a per-turn checkpoint, run a planner prompt that returns JSON tool actions, execute those tools, append tool results, recover from common failures, and repeat until the planner finishes or goals are met.
-10. Before shell execution, classify command risk. Before file mutation, record the file's pre-write state in the active checkpoint. After mutation, record the post-write hash.
+9. Create a per-turn checkpoint, run a planner prompt that returns JSON tool actions, execute those tools through `ToolPipeline`, append tool results, recover from common failures, and repeat until the planner finishes or goals are met.
+10. `PreToolUse` hooks enforce permissions, workspace boundaries, command risk, sensitive path, and mutation checkpoint snapshots. `PostToolUse` hooks record mutation results and redact observations before persistence.
 11. After file mutation, infer the project command profile and run available validation commands through the existing `shell` tool. Failed output is parsed into structured errors; with LLM enabled, the planner can attempt repairs and retry validation up to 3 times.
 12. Ask `reflectionPolicy` whether the turn needs no, light, or full reflection. Simple read/list/search turns skip reflection; code changes, validation, failures, risky work, or explicit review requests run the reviewer and can write durable memory lessons.
 13. Build a context monitor report for the active session, including estimated active tokens, tool-result ratio, compression state, CCR cache count, and approximate cost metadata.
-14. Generate final assistant text through the configured provider; provider usage is recorded when available, otherwise per-turn usage is estimated and marked as estimated.
+14. Generate final assistant text through the configured provider using the minimal `AgentLoop`: model response -> tool_use detection -> `ToolPipeline` execution -> tool_result feedback -> final text.
 15. Decide final summary visibility through `src/core/summaryPolicy.ts`: simple turns skip the large template, while edits, tests, failures, Plan/Todo, Python, and Git/change operations get a brief or full summary according to config.
 16. Save the session under `.code-agent/sessions`.
+
+## Agent Harness Core
+
+The model is the agent. This codebase is the harness: it provides tools, context, permissions, durable state, and observable execution. The stable loop lives in `src/core/agentLoop.ts` and does not know about Git, Python, RAG, memory, MCP, or project validation. It only calls the model, detects tool uses, asks the tool pipeline to execute them, appends tool results, and stops when the model returns final text.
+
+`src/core/harness.ts` assembles the loop, `ToolRegistry`, `ToolPipeline`, `HookManager`, and `ContextPipeline`. New capabilities should be registered as tools with schema, permission, risk, handler, tags, and optional long-running metadata. The runtime and MCP server call the same registry/pipeline path, so external exposure does not bypass local safety checks.
+
+Hooks carry the harness-side policy:
+
+- `preToolUse`: permission checks, workspace scope, command risk, sensitive paths, and mutation snapshots.
+- `postToolUse`: mutation records, redaction, audit-friendly observations, and future transcript/task evidence hooks.
+- `onTurnStart` / `onTurnEnd`: context retrieval, token reporting, summary policy, and future background notifications.
+
+Context is also staged. The system prompt stays short and stable. Memory and RAG load only top relevant snippets. Skills enter the prompt as a catalog only; full workflows are loaded through `skill_read` or `skill_use`, so large instructions do not flood every turn.
 
 ## Interactive Flow
 
@@ -149,7 +165,7 @@ Two wire protocols are first-class:
 
 Provider routing is intentionally separate from model names. This avoids coupling the runtime to one vendor and keeps local models, gateways, and hosted APIs interchangeable.
 
-`src/core/config.ts` also supports named provider profiles loaded from `.code-agent.json` or `.code-agent/settings.json`. Profiles can define `provider`, `baseUrl`, `model`, `apiKey`, `apiKeyEnv`, and `useLlm`. `apiKeyEnv` lets paid-provider secrets stay in environment variables while the project config stores only the variable name. The REPL `/profile <name>` command rebuilds `AgentRuntime` with the selected profile and the current session id, so model/provider switching does not drop conversation context.
+`src/core/config.ts` also supports named provider profiles loaded from `.code-agent.json` or `.code-agent/settings.json`. Profiles can define `provider`, `baseUrl`, `baseUrlEnv`, `model`, `modelEnv`, `apiKey`, `apiKeyEnv`, and `useLlm`. The `*Env` keys let machine-specific values stay in environment variables while the project config stores only the variable name: `apiKeyEnv` covers paid-provider secrets, `baseUrlEnv` covers an endpoint that differs per host (a LAN Ollama server, for example), and `modelEnv` covers a model that only exists on that host. An unset variable falls back to the committed default, so a fresh clone still runs. The REPL `/profile <name>` command rebuilds `AgentRuntime` with the selected profile and the current session id, so model/provider switching does not drop conversation context.
 
 ## Safety Strategy
 

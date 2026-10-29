@@ -68,8 +68,8 @@ CODE_AGENT_DIALOG_BLOCKS=1
 CODE_AGENT_SHOW_TOKEN_USAGE=1
 CODE_AGENT_SUMMARY_MODE=auto
 CODE_AGENT_TERMINAL_MODE=tui
-CODE_AGENT_THINKING_DISPLAY=summary
-CODE_AGENT_LLM_TIMEOUT_MS=120000
+CODE_AGENT_THINKING_DISPLAY=off
+CODE_AGENT_LLM_TIMEOUT_MS=300000
 ```
 
 ### Provider Profiles
@@ -83,23 +83,27 @@ Provider/model profiles can be configured in `.code-agent.json` or `.code-agent/
     "ollama": {
       "provider": "openai-compatible",
       "baseUrl": "http://localhost:11434/v1",
-      "apiKey": "ollama",
+      "baseUrlEnv": "OLLAMA_BASE_URL",
+      "apiKeyEnv": "OLLAMA_API_KEY",
       "model": "qwen3:8b",
+      "modelEnv": "OLLAMA_MODEL",
       "useLlm": true
     },
     "deepseek": {
       "provider": "openai-compatible",
       "baseUrl": "https://api.deepseek.com",
+      "baseUrlEnv": "DEEPSEEK_BASE_URL",
       "apiKeyEnv": "DEEPSEEK_API_KEY",
       "model": "deepseek-v4-flash",
+      "modelEnv": "DEEPSEEK_MODEL",
       "useLlm": true
     }
   },
-  "llmTimeoutMs": 120000,
+  "llmTimeoutMs": 300000,
   "ui": {
     "dialogBlocks": true,
     "showTokenUsage": true,
-    "thinkingDisplay": "summary",
+    "thinkingDisplay": "off",
     "summaryMode": "auto",
     "terminalMode": "tui"
   }
@@ -110,6 +114,13 @@ Keep paid provider keys in environment variables or `.env`, not in committed con
 
 ```powershell
 $env:DEEPSEEK_API_KEY="sk-..."
+```
+
+`apiKeyEnv`, `baseUrlEnv`, and `modelEnv` work the same way: when the named variable is set it wins over the profile's `apiKey`/`baseUrl`/`model`, and when it is unset the committed default applies. That keeps machine-specific endpoints out of the repository — a fresh clone points at `localhost`, while a machine that runs Ollama on another host only needs its local, ignored `.env`:
+
+```env
+OLLAMA_BASE_URL=http://192.168.1.105:11434/v1
+OLLAMA_MODEL=qwen3.6:27b
 ```
 
 Switch in the REPL:
@@ -150,8 +161,8 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 
 ## Permission Modes
 
-- `read-only`: read/list/glob/grep/route/summary.
-- `workspace-write`: read plus write/edit inside the workspace.
+- `read-only`: read/list/glob/grep/exists/route/summary.
+- `workspace-write`: read plus write/edit/delete/move inside the workspace.
 - `danger-full-access`: all tools, including shell.
 
 File and shell path operands are still checked against the workspace root.
@@ -174,6 +185,8 @@ session load <id>
 mcp-server
 doctor
 ```
+
+`prompt`, `turn-loop`, and `bootstrap` exit non-zero when the provider call failed and the printed answer is a fallback. The fallback text is still rendered on stdout, `llmFailure` carries the reason in `--output-format json`, and `error: llm_unavailable: <reason>` goes to stderr, so scripts and CI can tell a real answer from a dead model.
 
 ## Interactive Shell
 
@@ -198,17 +211,25 @@ Useful slash commands:
 /profile [list|current|name]
 /provider [openai-compatible|anthropic]
 /permissions [read-only|workspace-write|danger-full-access]
-/session
-/sessions
-/resume <id>
+/session [rename|summarize|id|refresh-title]
+/sessions [all|current-workspace|search]
+/resume [selector]
 /compact [keep]
 /compress [keep]
 /goals
 /memory [query]
 /rag index [path]
 /rag search <query>
+/python [run|exec|last|clean]
+/skills [list|search|use|read|create|reload|init]
 /verbose on|off
 /markdown on|off
+/dialog-blocks on|off
+/thinking off|summary|verbose
+/timeout [ms]
+/summary auto|off|always
+/terminal-mode tui|scrollback
+/copy last|turn|all|transcript|save
 /transcript [all|save]
 /diff [path]
 /changes
@@ -230,6 +251,8 @@ Useful slash commands:
 /clear
 /exit
 ```
+
+`/timeout` sets the LLM request timeout. For OpenAI-compatible streaming responses, the same value is treated as an idle timeout and refreshes whenever a stream chunk arrives.
 
 `/compact` compresses older session messages into one summary message and keeps the latest messages. The default keep count is `6`.
 
@@ -481,7 +504,7 @@ Context monitoring commands:
 /cost      Estimate cost for configured remote models; local Ollama-compatible models show 0/unavailable.
 ```
 
-`/resume <id>` still restores the chat session, but it now also renders a long-term recovery view with the last prompt, active goals, current plan, changed files, executed commands, validation status, blocked reasons, and next steps. `/resume-task` continues the latest incomplete task plan.
+`/resume [selector]` switches the active session by list number, title/summary keyword, session id, id prefix, or `latest`. Running `/resume` without a selector lists readable session titles, summaries, timestamps, message counts, profiles, and short ids. Resume is a session switch: the target session replaces the active runtime messages and the `/resume` command itself is not appended to the target conversation. Cross-workspace sessions are rejected by default unless `--allow-workspace-switch` is provided. `/resume-task` continues the latest incomplete task plan.
 
 ## Git, Checkpoints, Revert, And Safety
 
@@ -579,6 +602,31 @@ The runtime uses a model-driven tool loop:
 
 This mirrors the `claw-code` flow where the model emits `ToolUse`, the runtime returns `ToolResult`, and the next model call sees the observation. With `--no-llm`, the runtime only runs deterministic read/list/search/url actions when inputs are obvious; it does not fabricate generated code.
 
+## Agent Harness Architecture
+
+The model is the agent; Code Agent is the harness around it. The harness provides tools, context, permissions, durable state, and observable execution, but it should not hardcode business workflows into the main loop.
+
+The stable loop is intentionally small:
+
+```text
+model(messages, tools)
+if no tool_use: return final text
+execute tool_use through ToolPipeline
+append tool_result observations
+repeat
+```
+
+The first-stage harness split is:
+
+- `src/core/agentLoop.ts`: model/tool-result loop with no tool-specific imports.
+- `src/core/toolPipeline.ts`: normalize tool calls, run `PreToolUse`, execute handlers, run `PostToolUse`, and return observations.
+- `src/core/hooks.ts`: permission, workspace boundary, command-risk, sensitive-path, checkpoint, redaction, and future audit hooks.
+- `src/core/contextPipeline.ts`: memory/RAG/skill selection, CCR preparation, and system prompt assembly.
+- `src/core/harness.ts`: wires the loop, registry, hooks, tool pipeline, and context pipeline together.
+- `src/tools/registry.ts`: `ToolRegistry` owns schemas, permissions, risks, handlers, tags, long-running metadata, and MCP/model schema exports.
+
+New capabilities should be added as tools, not by branching inside `runtime.ts`. MCP exposure uses the same registry and tool pipeline, so MCP `tools/call` still passes through permission and safety hooks. Skills are listed as a catalog by default; full skill workflows are loaded only through `skill_read` or `skill_use`.
+
 ## Web Search
 
 Registered web tools:
@@ -605,7 +653,7 @@ Start the stdio MCP server:
 codeagent mcp-server
 ```
 
-It exposes the registered tools through `tools/list` and `tools/call`, including file tools, web tools, and `ccr_retrieve`.
+It exposes the registered tools through `tools/list` and `tools/call`, including file tools, web tools, and `ccr_retrieve`. The MCP server exports schemas from `ToolRegistry` and executes calls through the same permission, risk, redaction, and workspace-boundary pipeline as local runtime tools.
 
 ## Context Compression
 

@@ -11,8 +11,27 @@
 
 This file is the project change ledger. Every implementation batch records the files written or modified and the reason.
 
+## 2026-10-29
+
+- Added `llmFailure` to `TurnSummary` and `LLM_UNAVAILABLE_MARKER` / `llmUnavailableReason` to `src/core/llm.ts`, so the fallback marker is defined once instead of being rebuilt at each failure site.
+- Updated `src/index.ts` so `prompt`, `turn-loop`, and `bootstrap` exit non-zero and write `error: llm_unavailable: <reason>` to stderr when the provider call failed. Previously a dead model endpoint still reported success, which made the CLI unusable from scripts and CI. The fallback answer is still printed on stdout, and `--output-format json` now carries `llmFailure`.
+- Added `baseUrlEnv` and `modelEnv` profile overrides in `src/core/config.ts`; `listRuntimeProfiles` reports the resolved endpoint and model so `/profile list` shows what actually runs.
+- Made `.code-agent.json` portable: the `ollama` profile defaults to `http://localhost:11434/v1` with `qwen3:8b` and reads `OLLAMA_BASE_URL` / `OLLAMA_MODEL`; the `deepseek` profile reads `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL`. The machine-specific LAN endpoint and `qwen3.6:27b` moved to the ignored local `.env`.
+- Repaired `.gitignore`, which had a UTF-16LE fragment (`.env`, `*.env`) appended after its UTF-8 content, leaving NUL bytes in the file. Added the personal scratch files `总结.md` and `get_huagong_tech_data.py` so they stay out of the repository.
+- Added `tests/llm.test.ts` and extended `tests/runtime.test.ts` / `tests/config.test.ts` with regression coverage for the fallback marker, the non-zero exit path, and per-profile env overrides that must not leak across profiles.
+- Updated `README.md`, `ARCHITECTURE.md`, and `.env.example` with the env-override precedence, the exit-code contract, and the portable profile defaults.
+- Verified with `npm run typecheck`, `npm test` (233 passing), and `python -m py_compile py\agent_bridge.py`.
+
 ## 2026-06-18
 
+- Added first-stage Agent Harness architecture modules: `src/core/agentLoop.ts`, `src/core/toolPipeline.ts`, `src/core/hooks.ts`, `src/core/contextPipeline.ts`, and `src/core/harness.ts`.
+- Refactored `src/tools/registry.ts` around `ToolRegistry` metadata and handlers while preserving compatible `toolCatalog`, `findTool`, and `executeTool` exports.
+- Moved permission, workspace boundary, command-risk, sensitive-path, mutation checkpoint, and redaction behavior into default tool hooks used by `ToolPipeline`.
+- Updated `src/core/runtime.ts` so turn context comes from `ContextPipeline`, final assistant tool loops use `AgentLoop`, and direct tool execution goes through `AgentHarness`.
+- Added future boundary modules for background jobs, MCP tool adaptation, subagents, and worktree management without implementing the full second-stage features yet.
+- Updated `src/mcp/server.ts` so `tools/list` exports registry schemas and `tools/call` continues through the unified tool execution path.
+- Changed skill context injection to catalog-only by default; full workflows remain available through `skill_read` and `skill_use`.
+- Added harness regression coverage in `tests/agentLoop.test.ts`, `tests/toolPipeline.test.ts`, `tests/registry.test.ts`, plus MCP and skills tests for pipeline/schema behavior.
 - Refined slash menu filtering in `src/cli/slashMenu.ts` so command id/label prefixes rank ahead of descriptions; `/s` now surfaces `status`, `session`, `sessions`, `skills`, and `settings` instead of unrelated entries whose descriptions merely contain `s`.
 - Added root-level `status`, `session`, and `sessions` menu entries plus `tests/slashMenu.test.ts` coverage for single-letter slash filtering, and verified with `npm run typecheck`, `npm test`, and `python -m py_compile py\agent_bridge.py`.
 - Fixed slash menu selection movement in `src/cli/slashMenu.ts` by preserving `selectedIndex` across redraws when the typed filter has not changed; `/model` submenus now keep Up/Down selection instead of jumping back to the first row.
