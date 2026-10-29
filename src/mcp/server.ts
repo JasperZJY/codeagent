@@ -1,7 +1,7 @@
 import { stdin, stdout } from "node:process";
 import type { Readable, Writable } from "node:stream";
 import type { RuntimeConfig } from "../core/types.js";
-import { executeTool, toolCatalog } from "../tools/registry.js";
+import { defaultToolRegistry, executeTool } from "../tools/registry.js";
 
 interface JsonRpcMessage {
   jsonrpc?: "2.0";
@@ -39,14 +39,7 @@ export async function handleMcpMessage(
         });
       case "tools/list":
         return result(message.id, {
-          tools: toolCatalog.map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            inputSchema: {
-              type: "object",
-              ...(tool.inputSchema ?? {})
-            }
-          }))
+          tools: defaultToolRegistry.schemaForMcp()
         });
       case "tools/call":
         return await callTool(message, config);

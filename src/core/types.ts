@@ -243,8 +243,31 @@ export interface ToolSpec {
   name: string;
   description: string;
   requiredPermission: PermissionMode;
+  permission?: ToolPermission;
+  risk?: ToolRisk;
   inputSchema: Record<string, unknown>;
   routeHints: string[];
+  tags?: string[];
+  longRunning?: boolean;
+}
+
+export type ToolPermission = "read" | "write" | "execute" | "network" | "dangerous";
+
+export type ToolRisk = "safe" | "write" | "network" | "destructive" | "credential-risk" | "system-risk";
+
+export interface ToolHandlerContext {
+  permissionMode: PermissionMode;
+  workspaceRoot: string;
+  cwd?: string;
+  checkpointId?: string;
+}
+
+export type ToolHandler = (input: Record<string, unknown>, context: ToolHandlerContext) => Promise<unknown> | unknown;
+
+export interface ToolDefinition extends ToolSpec {
+  permission: ToolPermission;
+  risk: ToolRisk;
+  handler: ToolHandler;
 }
 
 export interface RoutedMatch {
@@ -306,6 +329,8 @@ export interface TurnSummary {
   usage: TokenUsage;
   turnUsage?: TokenUsage;
   stopReason: StopReason;
+  /** Set when the provider call failed and the answer is a fallback. */
+  llmFailure?: string;
   trace?: RuntimeTraceEvent[];
   taskPlan?: AgentTaskPlan;
   validation?: TestFixLoopResult;

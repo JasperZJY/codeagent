@@ -3,16 +3,20 @@
   "profiles": {
     "ollama": {
       "provider": "openai-compatible",
-      "baseUrl": "http://192.168.1.105:11434/v1",
+      "baseUrl": "http://localhost:11434/v1",
+      "baseUrlEnv": "OLLAMA_BASE_URL",
       "apiKeyEnv": "OLLAMA_API_KEY",
-      "model": "qwen3.6:27b",
+      "model": "qwen3:8b",
+      "modelEnv": "OLLAMA_MODEL",
       "useLlm": true
     },
     "deepseek": {
       "provider": "openai-compatible",
       "baseUrl": "https://api.deepseek.com",
+      "baseUrlEnv": "DEEPSEEK_BASE_URL",
       "apiKeyEnv": "DEEPSEEK_API_KEY",
       "model": "deepseek-v4-pro",
+      "modelEnv": "DEEPSEEK_MODEL",
       "useLlm": true
     }
   },

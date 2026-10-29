@@ -1,5 +1,5 @@
 import { visualLength } from "./markdownRenderer.js";
-import type { RuntimeConfig } from "../core/types.js";
+import type { PermissionMode, RuntimeConfig } from "../core/types.js";
 
 export interface SlashMenuItem {
   id: string;
@@ -22,10 +22,87 @@ export interface SlashMenuSelection {
   submitted?: boolean;
 }
 
+const permissionModeItems: Array<{ mode: PermissionMode; description: string }> = [
+  { mode: "read-only", description: "Read/list/search only" },
+  { mode: "workspace-write", description: "Allow workspace file edits" },
+  { mode: "danger-full-access", description: "Allow shell and dangerous tools" }
+];
+
+const resumeMenuItems: SlashMenuItem[] = [
+  {
+    id: "latest",
+    label: "latest",
+    description: "Resume most recent session",
+    command: "/resume latest",
+    keywords: ["last", "recent"]
+  },
+  {
+    id: "list",
+    label: "list",
+    description: "List resumable sessions",
+    command: "/resume",
+    keywords: ["sessions", "ls"]
+  },
+  {
+    id: "number",
+    label: "number",
+    description: "Resume by list number",
+    command: "/resume ",
+    keywords: ["index", "1", "2", "selector"]
+  },
+  {
+    id: "title",
+    label: "title / keyword",
+    description: "Resume by title, summary, or last prompt",
+    command: "/resume ",
+    keywords: ["name", "search", "keyword"]
+  },
+  {
+    id: "session-id",
+    label: "session id",
+    description: "Resume by session id or id prefix",
+    command: "/resume ",
+    keywords: ["id", "prefix"]
+  },
+  {
+    id: "task",
+    label: "task plan",
+    description: "Resume latest incomplete task plan",
+    command: "/resume-task",
+    keywords: ["resume-task", "plan", "todo"]
+  },
+  {
+    id: "allow-workspace",
+    label: "allow workspace",
+    description: "Allow switching to another workspace session",
+    command: "/resume ",
+    keywords: ["workspace", "cross-workspace"]
+  }
+];
+
 export const slashMenuRoot: SlashMenuItem[] = [
   { id: "status", label: "status", description: "Show runtime status", command: "/status" },
   { id: "session", label: "session", description: "Show active session", command: "/session" },
   { id: "sessions", label: "sessions", description: "List saved sessions", command: "/sessions" },
+  {
+    id: "resume",
+    label: "resume",
+    description: "Switch saved session",
+    command: "/resume ",
+    children: resumeMenuItems,
+    keywords: ["re", "session restore", "恢复会话"]
+  },
+  {
+    id: "permissions",
+    label: "permissions",
+    description: "Switch permission mode",
+    command: "/permissions ",
+    children: permissionMenuItemsForConfig(),
+    keywords: ["permission", "perm", "per", "权限"]
+  },
+  { id: "context", label: "context", description: "Show context health", command: "/context" },
+  { id: "tokens", label: "tokens", description: "Show token usage", command: "/tokens" },
+  { id: "cost", label: "cost", description: "Show cost status", command: "/cost" },
   {
     id: "model",
     label: "model",
@@ -41,17 +118,6 @@ export const slashMenuRoot: SlashMenuItem[] = [
     children: [
       { id: "list", label: "list", description: "List profiles", command: "/profile list" },
       { id: "current", label: "current", description: "Show current profile", command: "/profile current" }
-    ]
-  },
-  { id: "tools", label: "tools", description: "Inspect available tools", command: "/tools " },
-  {
-    id: "files",
-    label: "files",
-    description: "Read and search files",
-    children: [
-      { id: "read", label: "read file", description: "Read a workspace file", command: "read " },
-      { id: "list", label: "list dir", description: "List a directory", command: "list " },
-      { id: "search", label: "search text", description: "Search text in files", command: "search " }
     ]
   },
   {
@@ -128,10 +194,11 @@ export const slashMenuRoot: SlashMenuItem[] = [
       { id: "markdown", label: "markdown", description: "Toggle Markdown", command: "/markdown " },
       { id: "dialog", label: "dialog blocks", description: "Toggle You/Agent blocks", command: "/dialog-blocks " },
       { id: "thinking", label: "thinking", description: "Show reasoning status", command: "/thinking " },
+      { id: "timeout", label: "timeout", description: "Set LLM idle timeout", command: "/timeout " },
       { id: "tokens", label: "tokens", description: "Toggle token line", command: "/tokens show " },
       { id: "summary", label: "summary", description: "Set summary mode", command: "/summary " },
       { id: "terminal", label: "terminal mode", description: "TUI or scrollback", command: "/terminal-mode " },
-      { id: "permissions", label: "permissions", description: "Switch permissions", command: "/permissions " }
+      { id: "permissions", label: "permissions", description: "Switch permissions", command: "/permissions ", children: permissionMenuItemsForConfig() }
     ]
   },
   {
@@ -200,7 +267,7 @@ export function enterSlashMenuSelection(state: SlashMenuState, config?: RuntimeC
   if (item.children?.length) {
     return {
       state: { path: [...state.path, item.id], selectedIndex: 0, filter: "" },
-      input: `/${[...state.path, item.id].join(" ")} `
+      input: item.command ?? `/${[...state.path, item.id].join(" ")} `
     };
   }
   return {
@@ -225,6 +292,10 @@ export function completeSlashMenuSelectionForConfig(state: SlashMenuState, confi
   return enterSlashMenuSelection(state, config).input;
 }
 
+export function slashMenuInputPrefix(state: SlashMenuState): string {
+  return commandPrefixForPath(state) ?? (state.path.length ? `/${state.path.join(" ")} ` : "/");
+}
+
 export function updateSlashMenuFilterFromInput(input: string, state: SlashMenuState): SlashMenuState {
   const body = input.trimStart().slice(1);
   const parts = body.split(/\s+/).filter(Boolean);
@@ -234,7 +305,9 @@ export function updateSlashMenuFilterFromInput(input: string, state: SlashMenuSt
     selectedIndex: filter === state.filter ? state.selectedIndex : 0
   });
   if (state.path.length > 0) {
-    const prefix = state.path.join(" ");
+    const pathPrefix = state.path.join(" ");
+    const commandPrefix = commandPrefixForPath(state)?.replace(/^\//, "").trim();
+    const prefix = commandPrefix && body.startsWith(commandPrefix) ? commandPrefix : pathPrefix;
     const rest = body.startsWith(prefix) ? body.slice(prefix.length).trim() : "";
     return withFilter(rest);
   }
@@ -288,6 +361,7 @@ function slashMenuRootForConfig(config?: RuntimeConfig): SlashMenuItem[] {
     ...profileItems,
     { id: "manual", label: "manual", description: "Type a model name", command: "/model " }
   ];
+  const permissionItems = permissionMenuItemsForConfig(config);
   return slashMenuRoot.map((item) => {
     if (item.id === "model") {
       return { ...item, children: uniqueMenuItems(modelItems) };
@@ -295,8 +369,50 @@ function slashMenuRootForConfig(config?: RuntimeConfig): SlashMenuItem[] {
     if (item.id === "profile") {
       return { ...item, children: uniqueMenuItems([...profileItems, ...(item.children ?? [])]) };
     }
+    if (item.id === "permissions") {
+      return { ...item, children: permissionItems };
+    }
+    if (item.id === "settings") {
+      return {
+        ...item,
+        children: (item.children ?? []).map((child) =>
+          child.id === "permissions" ? { ...child, children: permissionItems } : child
+        )
+      };
+    }
     return item;
   });
+}
+
+function permissionMenuItemsForConfig(config?: RuntimeConfig): SlashMenuItem[] {
+  const currentMode = config?.permissionMode;
+  if (!currentMode) {
+    return [
+      { id: "current", label: "current", description: "Show current mode", command: "/permissions" },
+      ...permissionModeItems.map((item) => permissionModeMenuItem(item.mode, item.description))
+    ];
+  }
+
+  return [
+    {
+      id: "current",
+      label: currentMode,
+      description: "Current permission mode",
+      command: `/permissions ${currentMode}`
+    },
+    ...permissionModeItems
+      .filter((item) => item.mode !== currentMode)
+      .map((item) => permissionModeMenuItem(item.mode, item.description))
+  ];
+}
+
+function permissionModeMenuItem(mode: PermissionMode, description: string): SlashMenuItem {
+  return {
+    id: mode,
+    label: mode,
+    description,
+    command: `/permissions ${mode}`
+  };
 }
 
 function uniqueMenuItems(items: SlashMenuItem[]): SlashMenuItem[] {
@@ -348,6 +464,10 @@ function findMenuItem(pathIds: string[], root: SlashMenuItem[] = slashMenuRoot):
     items = current.children ?? [];
   }
   return current;
+}
+
+function commandPrefixForPath(state: SlashMenuState): string | undefined {
+  return findMenuItem(state.path)?.command;
 }
 
 function fitTail(value: string, width: number): string {

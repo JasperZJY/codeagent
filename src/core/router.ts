@@ -97,12 +97,25 @@ function inferIntentMatches(prompt: string): RoutedMatch[] {
     matches.push(toolMatch("fetch_url", 48));
     return matches;
   }
+  if (hasPathLike(prompt) && includesAny(lowered, ["delete", "remove", "rm ", "unlink", "删除", "移除"])) {
+    matches.push(toolMatch("delete_file", 65));
+  }
+  if (hasPathLike(prompt) && includesAny(lowered, ["move", "rename", "mv ", "移动", "重命名", "改名"])) {
+    matches.push(toolMatch("move_file", 64));
+  }
+  if (hasPathLike(prompt) && includesAny(lowered, ["exists", "exist", "check file", "path exists", "是否存在", "存在吗", "有没有"])) {
+    matches.push(toolMatch("file_exists", 63));
+  }
   if (includesAny(lowered, [
     "上网",
     "联网",
     "互联网",
     "网页搜索",
     "搜索网页",
+    "新闻",
+    "热点",
+    "今日",
+    "今天发生",
     "web search",
     "internet search",
     "latest",
@@ -184,19 +197,32 @@ function inferIntentMatches(prompt: string): RoutedMatch[] {
 
 function isWriteIntent(prompt: string): boolean {
   const lowered = prompt.toLowerCase();
-  return [
+  const writeNeedles = [
     "write",
     "create",
     "save",
     "generate",
+    "output to",
+    "save as",
+    "save to",
     "编写",
     "生成",
     "保存",
+    "保存到",
+    "保存在",
     "写入",
     "创建",
+    "新建",
+    "输出到",
+    "存到",
     "放在",
     "放到"
-  ].some((needle) => lowered.includes(needle));
+  ];
+  if (includesAny(lowered, writeNeedles)) {
+    return true;
+  }
+  return includesAny(lowered, ["markdown", ".md", "md 文件", "md文件"]) &&
+    includesAny(lowered, ["保存", "写入", "生成", "创建", "输出", "存到", "放到", "save", "write", "create"]);
 }
 
 function toolMatch(name: string, score: number): RoutedMatch {

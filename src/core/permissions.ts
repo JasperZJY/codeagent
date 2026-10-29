@@ -55,10 +55,15 @@ function validateWorkspaceScope(
     return { allowed: decision.allowed, reason: decision.reason };
   }
 
-  const pathValue = objectInput["path"];
-  if (typeof pathValue === "string") {
+  for (const key of ["path", "newPath", "from", "to", "source", "destination"]) {
+    const pathValue = objectInput[key];
+    if (typeof pathValue !== "string") {
+      continue;
+    }
     const decision = scope.validatePath(pathValue, context.cwd ?? context.workspaceRoot);
-    return { allowed: decision.allowed, reason: decision.reason };
+    if (!decision.allowed) {
+      return { allowed: false, reason: decision.reason };
+    }
   }
 
   return { allowed: true, reason: "workspace path scope not required" };

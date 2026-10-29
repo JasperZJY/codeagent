@@ -10,8 +10,10 @@ import {
   summarizeGoals,
   updateGoalsFromExecution
 } from "./goals.js";
-import { generateAssistantResult, generateAssistantText } from "./llm.js";
-import { buildMemoryContext, deriveMemoryFromTurn, MemoryStore, type MemoryEntry } from "./memory.js";
+import { AgentHarness } from "./harness.js";
+import { generateAssistantResult, generateAssistantText, llmUnavailableReason } from "./llm.js";
+import { normalizeAssistantResult, normalizeAssistantText, toolUseMessage, type InternalToolUse } from "./modelAdapter.js";
+import { deriveMemoryFromTurn, MemoryStore, type MemoryEntry } from "./memory.js";
 import {
   buildCoordinatorSystemPrompt,
   buildPlanningSystemPrompt,
@@ -23,7 +25,7 @@ import {
   type AgentRoutePlan,
   type ModelToolAction
 } from "./planner.js";
-import { buildRagContext, indexWorkspace, searchRag, type RagSearchResult } from "./rag.js";
+import { indexWorkspace, searchRag, type RagSearchResult } from "./rag.js";
 import { planRecovery } from "./recovery.js";
 import { decideReflection, type ReflectionDecision } from "./reflectionPolicy.js";
 import { formatReflection, runReflection, type ReflectionReport } from "./reflection.js";
@@ -32,6 +34,8 @@ import { routePrompt } from "./router.js";
 import {
   appendMessage,
   estimateUsage,
+  refreshSessionMetadata,
+  sessionHasMeaningfulContent,
   type PersistedSession,
   SessionStore
 } from "./session.js";
@@ -49,7 +53,6 @@ import {
   type TestFixFailure
 } from "./testRunner.js";
 import { initializeProject } from "./projectInit.js";
-import { buildSkillsContext, matchSkillsForPrompt, type SkillMatch } from "./skills.js";
 import { decideSummary } from "./summaryPolicy.js";
 import type {
   AgentTaskPlan,
@@ -67,7 +70,6 @@ import type {
   ToolExecution,
   TurnSummary
 } from "./types.js";
-import { executeTool } from "../tools/registry.js";
 
 export interface BootstrapReport {
   prompt: string;
@@ -91,17 +93,19 @@ interface PlannedToolResult {
 
 export class AgentRuntime {
   private readonly sessionStore: SessionStore;
+  private readonly harness: AgentHarness;
   private session?: PersistedSession;
   private activeCheckpointId: string | undefined;
 
   constructor(private readonly config: RuntimeConfig) {
     this.sessionStore = new SessionStore(config.workspaceRoot);
+    this.harness = new AgentHarness(config);
   }
 
   async bootstrap(prompt: string, limit: number): Promise<BootstrapReport> {
     const turn = await this.runTurn(prompt, limit);
     const session = await this.currentSession();
-    const savedPath = await this.sessionStore.save(session);
+    const savedPath = await this.sessionStore.save(session, this.sessionRuntimeMetadata());
     return {
       prompt,
       config: {
@@ -126,7 +130,7 @@ export class AgentRuntime {
       }
     }
     if (this.session) {
-      await this.sessionStore.save(this.session);
+      await this.sessionStore.save(this.session, this.sessionRuntimeMetadata());
     }
     return results;
   }
@@ -186,28 +190,26 @@ export class AgentRuntime {
       ok: true
     });
 
-    const memoryStore = new MemoryStore(this.config.workspaceRoot);
-    const memoryMatches = await memoryStore.search(prompt, 6);
+    const turnContext = await this.harness.prepareTurnContext(prompt, session.messages);
     addTrace({
       type: "info",
       label: "memory",
-      detail: memoryMatches.length ? `loaded ${memoryMatches.length} relevant memories` : "none"
+      detail: turnContext.memoryMatches.length ? `loaded ${turnContext.memoryMatches.length} relevant memories` : "none"
     });
-    const ragMatches = await safeRagSearch(this.config.workspaceRoot, prompt, 6);
     addTrace({
       type: "info",
       label: "rag",
-      detail: ragMatches.length ? `loaded ${ragMatches.length} snippets` : "none"
+      detail: turnContext.ragMatches.length ? `loaded ${turnContext.ragMatches.length} snippets` : "none"
     });
-    const skillMatches = await safeSkillMatch(this.config.workspaceRoot, prompt, 3);
-    for (const match of skillMatches) {
+    for (const match of turnContext.skillMatches) {
       addTrace({
         type: "info",
         label: "skill",
         detail: `${match.skill.name} (${match.reason})`
       });
     }
-    const runtimeContext = buildRuntimeContext(memoryMatches, ragMatches, skillMatches);
+    const runtimeContext = turnContext.runtimeContext;
+    const memoryStore = new MemoryStore(this.config.workspaceRoot);
 
     appendMessage(session, {
       role: "user",
@@ -228,19 +230,47 @@ export class AgentRuntime {
     let reflectionDecision: ReflectionDecision | undefined;
     let validation: TestFixLoopResult | undefined;
     let contextReport: ContextMonitorReport | undefined;
+    let deterministicFinalText: string | undefined;
 
-    if (shouldUseModelPlanner(this.config, routedMatches)) {
-      iterations += await this.runModelToolLoop(session, routedMatches, toolResults, runtimeContext, addTrace, taskStore, taskPlan);
+    const simpleLocalAnswer = buildSimpleLocalAnswer(prompt);
+    if (simpleLocalAnswer) {
+      addTrace({
+        type: "info",
+        label: "fast_path",
+        detail: "local_current_date"
+      });
+      deterministicFinalText = simpleLocalAnswer;
     } else {
-      const safeToolExecutions = await this.executeInferredReadOnlyTools(prompt, routedMatches, addTrace);
-      for (const execution of safeToolExecutions) {
-        const message = toolResultMessage(`auto-${execution.toolName}`, execution);
+      const deterministicAction = inferDeterministicFileAction(prompt, routedMatches);
+      if (deterministicAction) {
+        addTrace({
+          type: "info",
+          label: "fast_path",
+          detail: `${deterministicAction.tool}: ${deterministicAction.reason}`
+        });
+        const execution = await this.executeDeterministicToolAction(deterministicAction, addTrace);
+        const message = toolResultMessage(`fast-${execution.toolName}`, execution);
         appendMessage(session, message);
         toolResults.push(message);
         updateGoalsFromExecution(goals, execution);
         if (taskPlan) {
           updatePlanFromExecution(taskPlan, execution);
           taskPlan = await taskStore.save(taskPlan);
+        }
+        deterministicFinalText = buildDeterministicToolText(execution);
+      } else if (shouldUseModelPlanner(this.config, routedMatches)) {
+        iterations += await this.runModelToolLoop(prompt, session, routedMatches, toolResults, runtimeContext, addTrace, taskStore, taskPlan);
+      } else {
+        const safeToolExecutions = await this.executeInferredReadOnlyTools(prompt, routedMatches, addTrace);
+        for (const execution of safeToolExecutions) {
+          const message = toolResultMessage(`auto-${execution.toolName}`, execution);
+          appendMessage(session, message);
+          toolResults.push(message);
+          updateGoalsFromExecution(goals, execution);
+          if (taskPlan) {
+            updatePlanFromExecution(taskPlan, execution);
+            taskPlan = await taskStore.save(taskPlan);
+          }
         }
       }
     }
@@ -298,63 +328,39 @@ export class AgentRuntime {
       });
     }
 
-    const fallback = buildFallbackAssistantText(prompt, routedMatches, toolResults, this.config);
-    const finalContext = buildFinalContext(runtimeContext, goals, reflection);
-    addTrace({
-      type: "running",
-      label: "llm",
-      detail: this.config.useLlm ? `${this.config.provider}:${this.config.model}` : "disabled"
-    });
-    let sawThinkingDelta = false;
-    const generated = await generateAssistantResult(
-      this.config,
-      systemPrompt(this.config, finalContext),
-      session.messages,
-      fallback,
-      {
-        ...(options.onTextDelta ? { onTextDelta: options.onTextDelta } : {}),
-        onThinkingDelta: (event) => {
-          options.onThinkingDelta?.(event);
-          if (sawThinkingDelta) {
-            return;
-          }
-          sawThinkingDelta = true;
-          addTrace({
-            type: "info",
-            label: "thinking",
-            detail: `${event.source}: ${event.chars} chars hidden`,
-            output: event
-          });
-        }
-      }
-    );
-    if (!sawThinkingDelta && generated.thinking?.[0]) {
-      const event = generated.thinking[0];
-      addTrace({
-        type: "info",
-        label: "thinking",
-        detail: `${event.source}: ${event.chars} chars hidden`,
-        output: event
-      });
+    let text: string;
+    let turnUsage: NonNullable<ConversationMessage["usage"]>;
+    if (deterministicFinalText) {
+      text = deterministicFinalText;
+      turnUsage = { ...estimateUsage(prompt, text), estimated: true as const, source: "estimated" as const };
+    } else {
+      const fallback = buildFallbackAssistantText(prompt, routedMatches, toolResults, this.config);
+      const finalContext = buildFinalContext(runtimeContext, goals, reflection);
+      const assistantLoop = await this.runAssistantHarnessLoop(
+        prompt,
+        session,
+        routedMatches,
+        toolResults,
+        finalContext,
+        fallback,
+        addTrace,
+        options
+      );
+      iterations += assistantLoop.iterations;
+      text = assistantLoop.text;
+      turnUsage = assistantLoop.usage;
     }
-    const text = generated.text;
-    addTrace({
-      type: "ran",
-      label: "llm",
-      detail: this.config.useLlm ? "ok" : "fallback",
-      ok: true
-    });
 
-    const turnUsage = generated.usage ?? { ...estimateUsage(prompt, text), estimated: true as const, source: "estimated" as const };
     const assistantMessage: ConversationMessage = {
       role: "assistant",
       blocks: [{ type: "text", text }],
       usage: turnUsage
     };
     appendMessage(session, assistantMessage);
+    const llmFailure = llmUnavailableReason(text);
     contextReport = await buildContextMonitorReport(this.config, session);
     addTrace({ type: "running", label: "save", detail: session.sessionId });
-    await this.sessionStore.save(session);
+    await this.sessionStore.save(session, this.sessionRuntimeMetadata());
     addTrace({ type: "ran", label: "save", detail: session.sessionId, ok: true });
     this.activeCheckpointId = undefined;
 
@@ -368,12 +374,13 @@ export class AgentRuntime {
       turnUsage,
       stopReason: "completed",
       trace,
+      ...(llmFailure ? { llmFailure } : {}),
       ...(taskPlan ? { taskPlan } : {}),
       ...(validation ? { validation } : {}),
       ...(contextReport ? { contextReport } : {}),
       ...(reflectionDecision ? { reflectionDecision } : {}),
-      ...(skillMatches.length ? {
-        loadedSkills: skillMatches.map((match) => ({
+      ...(turnContext.skillMatches.length ? {
+        loadedSkills: turnContext.skillMatches.map((match) => ({
           name: match.skill.name,
           description: match.skill.description,
           source: match.skill.source,
@@ -393,8 +400,161 @@ export class AgentRuntime {
     };
   }
 
+  private async runAssistantHarnessLoop(
+    prompt: string,
+    session: PersistedSession,
+    routedMatches: RoutedMatch[],
+    toolResults: ConversationMessage[],
+    finalContext: string,
+    fallback: string,
+    addTrace: (event: RuntimeTraceEvent) => void,
+    options: RunTurnOptions
+  ): Promise<{ text: string; usage: NonNullable<ConversationMessage["usage"]>; iterations: number }> {
+    const maxIterations = Math.max(1, Math.min(this.config.maxTurns, 6));
+    let finalUsage: NonNullable<ConversationMessage["usage"]> | undefined;
+    let finalStreamBuffer = "";
+    const result = await this.harness.runAgentLoop({
+      maxIterations,
+      callModel: async (iteration) => {
+        addTrace({
+          type: "running",
+          label: "llm",
+          detail: this.config.useLlm ? `${this.config.provider}:${this.config.model}` : "disabled"
+        });
+        let sawThinkingDelta = false;
+        finalStreamBuffer = "";
+        const generated = await generateAssistantResult(
+          this.config,
+          this.harness.buildSystemPrompt(finalContext),
+          session.messages,
+          fallback,
+          {
+            onTextDelta: (delta) => {
+              finalStreamBuffer += delta;
+            },
+            onThinkingDelta: (event) => {
+              options.onThinkingDelta?.(event);
+              if (sawThinkingDelta) {
+                return;
+              }
+              sawThinkingDelta = true;
+              addTrace({
+                type: "info",
+                label: "thinking",
+                detail: `${event.source}: ${event.chars} chars hidden`,
+                output: event
+              });
+            }
+          }
+        );
+        if (!sawThinkingDelta && generated.thinking?.[0]) {
+          const event = generated.thinking[0];
+          addTrace({
+            type: "info",
+            label: "thinking",
+            detail: `${event.source}: ${event.chars} chars hidden`,
+            output: event
+          });
+        }
+        const normalized = normalizeAssistantResult(generated, { idPrefix: `harness-${iteration + 1}` });
+        finalUsage = normalized.usage ?? {
+          ...estimateUsage(prompt, normalized.text || generated.text),
+          estimated: true as const,
+          source: "estimated" as const
+        };
+        if (normalized.toolUses.length === 0) {
+          if (finalStreamBuffer) {
+            options.onTextDelta?.(finalStreamBuffer);
+          }
+          addTrace({
+            type: "ran",
+            label: "llm",
+            detail: this.config.useLlm ? "ok" : "fallback",
+            ok: true
+          });
+        }
+        return {
+          text: normalized.text,
+          toolUses: normalized.toolUses,
+          usage: finalUsage
+        };
+      },
+      onToolPlan: (toolUses) => {
+        addTrace({
+          type: "running",
+          label: "tool_text_plan",
+          detail: toolUses.map((toolUse) => `tool:${toolUse.name}`).join(", "),
+          input: { actions: toolUses.map((toolUse) => ({ tool: toolUse.name, input: toolUse.input })) }
+        });
+      },
+      executeToolUses: async (toolUses) => {
+        const observations = [];
+        for (const toolUse of toolUses) {
+          const message = await this.executeHarnessToolUse(toolUse, session, addTrace);
+          appendMessage(session, message);
+          toolResults.push(message);
+          const block = message.blocks.find((item) => item.type === "tool_result");
+          if (block?.type === "tool_result") {
+            observations.push({
+              toolUseId: block.toolUseId,
+              toolName: block.toolName,
+              ok: !block.isError,
+              output: block.output
+            });
+          }
+        }
+        addTrace({ type: "ran", label: "tool_text_plan", detail: "executed", ok: true });
+        return observations;
+      }
+    });
+
+    if (result.stoppedBy === "final_text") {
+      return {
+        text: result.text,
+        usage: result.usage ?? finalUsage ?? { ...estimateUsage(prompt, result.text), estimated: true, source: "estimated" },
+        iterations: result.iterations
+      };
+    }
+
+    addTrace({
+      type: "info",
+      label: "llm",
+      detail: `max harness iterations reached (${maxIterations})`
+    });
+    return {
+      text: buildFallbackAssistantText(prompt, routedMatches, toolResults, this.config),
+      usage: { ...estimateUsage(prompt, fallback), estimated: true as const, source: "estimated" as const },
+      iterations: maxIterations
+    };
+  }
+
+  private async executeHarnessToolUse(
+    toolUse: InternalToolUse,
+    session: PersistedSession,
+    addTrace: (event: RuntimeTraceEvent) => void
+  ): Promise<ConversationMessage> {
+    appendMessage(session, toolUseMessage(toolUse));
+    addTrace({
+      type: "running",
+      label: toolUse.name,
+      detail: toolUse.reason ?? describeToolInput(toolUse.name, toolUse.input),
+      input: toolUse.input
+    });
+    const execution = await this.execTool(toolUse.name, toolUse.input);
+    addTrace({
+      type: "ran",
+      label: toolUse.name,
+      detail: execution.ok ? summarizeToolOutput(execution.output) : String(execution.output),
+      ok: execution.ok,
+      durationMs: execution.durationMs,
+      input: toolUse.input,
+      output: execution.output
+    });
+    return toolResultMessage(toolUse.id, execution);
+  }
+
   async execTool(name: string, payload: unknown): Promise<ToolExecution> {
-    return await executeTool(name, payload, {
+    return await this.harness.executeTool(name, payload, {
       permissionMode: this.config.permissionMode,
       workspaceRoot: this.config.workspaceRoot,
       cwd: this.config.workspaceRoot,
@@ -411,16 +571,52 @@ export class AgentRuntime {
     if (!loaded) {
       throw new Error(`session_not_found: ${sessionId}`);
     }
-    loaded.model = this.config.model;
-    this.session = loaded;
-    await this.sessionStore.save(loaded);
-    return loaded;
+    return await this.replaceActiveSession(loaded);
+  }
+
+  async replaceActiveSession(session: PersistedSession): Promise<PersistedSession> {
+    this.activeCheckpointId = undefined;
+    refreshSessionMetadata(session, this.sessionRuntimeMetadata());
+    this.session = session;
+    await this.sessionStore.save(session, this.sessionRuntimeMetadata());
+    return session;
+  }
+
+  async saveCurrentSessionIfMeaningful(): Promise<boolean> {
+    if (!this.session || !sessionHasMeaningfulContent(this.session)) {
+      return false;
+    }
+    await this.sessionStore.save(this.session, this.sessionRuntimeMetadata());
+    return true;
+  }
+
+  async renameCurrentSession(title: string): Promise<PersistedSession> {
+    const session = await this.currentSession();
+    session.title = title;
+    refreshSessionMetadata(session, this.sessionRuntimeMetadata());
+    await this.sessionStore.save(session, this.sessionRuntimeMetadata());
+    return session;
+  }
+
+  async refreshCurrentSessionTitle(): Promise<PersistedSession> {
+    const session = await this.currentSession();
+    refreshSessionMetadata(session, this.sessionRuntimeMetadata(), { forceTitle: true });
+    await this.sessionStore.save(session, this.sessionRuntimeMetadata());
+    return session;
+  }
+
+  async summarizeCurrentSession(): Promise<PersistedSession> {
+    const session = await this.currentSession();
+    refreshSessionMetadata(session, this.sessionRuntimeMetadata(), { forceSummary: true });
+    await this.sessionStore.save(session, this.sessionRuntimeMetadata());
+    return session;
   }
 
   async compactContext(keepMessages = 6): Promise<ContextCompactionReport> {
     const session = await this.currentSession();
     const report = compactSession(session, keepMessages);
-    await this.sessionStore.save(session);
+    refreshSessionMetadata(session, this.sessionRuntimeMetadata(), { forceSummary: true });
+    await this.sessionStore.save(session, this.sessionRuntimeMetadata());
     return report;
   }
 
@@ -442,8 +638,8 @@ export class AgentRuntime {
     return await searchRag(this.config.workspaceRoot, query, limit);
   }
 
-  async listSessions(): Promise<PersistedSession[]> {
-    return await this.sessionStore.list();
+  async listSessions(options: { allWorkspaces?: boolean } = {}): Promise<PersistedSession[]> {
+    return options.allWorkspaces ? await this.sessionStore.listAll() : await this.sessionStore.list();
   }
 
   async loadSession(sessionId: string): Promise<PersistedSession | undefined> {
@@ -490,10 +686,16 @@ export class AgentRuntime {
     if (!this.session) {
       this.session = await this.sessionStore.loadOrCreate(this.config.sessionId, this.config.model);
     }
-    if (this.session.model !== this.config.model) {
-      this.session.model = this.config.model;
-    }
+    refreshSessionMetadata(this.session, this.sessionRuntimeMetadata());
     return this.session;
+  }
+
+  private sessionRuntimeMetadata() {
+    return {
+      model: this.config.model,
+      provider: this.config.provider,
+      ...(this.config.profile !== undefined ? { profile: this.config.profile } : {})
+    };
   }
 
   private async runAutomaticValidation(
@@ -651,6 +853,7 @@ export class AgentRuntime {
   }
 
   private async runModelToolLoop(
+    prompt: string,
     session: PersistedSession,
     routedMatches: RoutedMatch[],
     toolResults: ConversationMessage[],
@@ -677,7 +880,10 @@ export class AgentRuntime {
         session.messages,
         ""
       );
-      const plan = parseModelActionPlan(planText);
+      const normalizedPlan = normalizeAssistantText(planText, { idPrefix: `planner-${iteration + 1}` });
+      const plan = normalizedPlan.toolUses.length
+        ? { actions: normalizedPlan.toolUses.map((toolUse) => ({ tool: toolUse.name, input: toolUse.input, ...(toolUse.reason ? { reason: toolUse.reason } : {}) })) }
+        : parseModelActionPlan(planText) ?? fallbackPlanFromRoute(routePlan, prompt);
       if (!plan) {
         addTrace({
           type: "ran",
@@ -877,6 +1083,115 @@ export class AgentRuntime {
     }
     return executions;
   }
+
+  private async executeDeterministicToolAction(
+    action: ModelToolAction,
+    addTrace: (event: RuntimeTraceEvent) => void
+  ): Promise<ToolExecution> {
+    addTrace({
+      type: "running",
+      label: action.tool,
+      detail: action.reason ?? describeToolInput(action.tool, action.input),
+      input: action.input
+    });
+    const execution = await this.execTool(action.tool, action.input);
+    addTrace({
+      type: "ran",
+      label: action.tool,
+      detail: execution.ok ? summarizeToolOutput(execution.output) : String(execution.output),
+      ok: execution.ok,
+      durationMs: execution.durationMs,
+      input: action.input,
+      output: execution.output
+    });
+    return execution;
+  }
+}
+
+function fallbackPlanFromRoute(routePlan: AgentRoutePlan, prompt: string): { actions: ModelToolAction[] } | undefined {
+  const actions: ModelToolAction[] = [];
+  for (const tool of routePlan.tools.slice(0, 3)) {
+    const input = inferToolInput(tool, prompt);
+    if (input) {
+      actions.push({ tool, input, reason: "fallback from coordinator route" });
+    }
+  }
+  return actions.length ? { actions } : undefined;
+}
+
+function buildSimpleLocalAnswer(prompt: string): string | undefined {
+  if (!asksCurrentDate(prompt)) {
+    return undefined;
+  }
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const day = now.getDate();
+  const weekday = ["日", "一", "二", "三", "四", "五", "六"][now.getDay()] ?? "";
+  return `今天是${year}年${month}月${day}日${weekday ? `，星期${weekday}` : ""}。`;
+}
+
+function asksCurrentDate(prompt: string): boolean {
+  const value = prompt.trim().toLowerCase();
+  if (!value) {
+    return false;
+  }
+  if (/(新闻|热点|天气|发生|搜索|查询|web|internet|latest|current events)/i.test(value)) {
+    return false;
+  }
+  const compactPrompt = value.replace(/[\s?？!！。。，,]/g, "");
+  return [
+    "今天是几月几日",
+    "今天几月几日",
+    "今天是几号",
+    "今天几号",
+    "今天日期",
+    "现在日期",
+    "当前日期",
+    "几号",
+    "日期",
+    "今天星期几",
+    "今天周几"
+  ].includes(compactPrompt) ||
+    /\bwhat(?:'s| is)?\s+(?:today'?s\s+)?date\b/.test(value) ||
+    /\btoday'?s\s+date\b/.test(value) ||
+    /\bwhat\s+day\s+is\s+it\b/.test(value);
+}
+
+function inferDeterministicFileAction(prompt: string, matches: RoutedMatch[]): ModelToolAction | undefined {
+  if (asksHowToPerformFileOperation(prompt)) {
+    return undefined;
+  }
+  const tool = inferFileActionToolFromPrompt(prompt);
+  if (!tool) {
+    return undefined;
+  }
+  if (!matches.some((match) => match.kind === "tool" && match.name === tool)) {
+    return undefined;
+  }
+  const input = inferToolInput(tool, prompt);
+  return input ? { tool, input, reason: "simple file operation" } : undefined;
+}
+
+function inferFileActionToolFromPrompt(prompt: string): string | undefined {
+  const lowered = prompt.toLowerCase();
+  if (!firstPathLike(prompt)) {
+    return undefined;
+  }
+  if (/\b(delete|remove|unlink|rm)\b|删除|移除/.test(lowered)) {
+    return "delete_file";
+  }
+  if (/\b(move|rename|mv)\b|移动|重命名|改名/.test(lowered)) {
+    return "move_file";
+  }
+  if (/\b(exists?|check)\b|是否存在|存在吗|有没有/.test(lowered)) {
+    return "file_exists";
+  }
+  return undefined;
+}
+
+function asksHowToPerformFileOperation(prompt: string): boolean {
+  return /\bhow\s+to\b|\bhow do i\b|如何|怎么/.test(prompt.toLowerCase());
 }
 
 function shouldUseModelPlanner(config: RuntimeConfig, matches: RoutedMatch[]): boolean {
@@ -940,6 +1255,14 @@ function inferToolInput(toolName: string, prompt: string): Record<string, unknow
   if (toolName === "read_file") {
     const file = firstPathLike(prompt);
     return file ? { path: file } : undefined;
+  }
+  if (toolName === "delete_file" || toolName === "file_exists") {
+    const file = firstPathLike(prompt);
+    return file ? { path: file } : undefined;
+  }
+  if (toolName === "move_file") {
+    const paths = allPathLike(prompt);
+    return paths[0] && paths[1] ? { path: paths[0], newPath: paths[1] } : undefined;
   }
   if (toolName === "list_dir") {
     return { path: firstPathLike(prompt) ?? "." };
@@ -1028,8 +1351,11 @@ function inferToolInput(toolName: string, prompt: string): Record<string, unknow
 }
 
 function firstPathLike(prompt: string): string | undefined {
-  const tokens = prompt.match(/(?:\.{1,2}[\\/]|[A-Za-z]:[\\/]|[\w.-]+[\\/])[\w./\\-]+|[\w.-]+\.(?:ts|tsx|js|json|py|md|rs|toml|txt)/g);
-  return tokens?.[0];
+  return allPathLike(prompt)[0];
+}
+
+function allPathLike(prompt: string): string[] {
+  return prompt.match(/(?:\.{1,2}[\\/]|[A-Za-z]:[\\/]|[\w.-]+[\\/])[\w./\\-]+|[\w.-]+\.(?:ts|tsx|js|json|py|md|rs|toml|txt|yaml|yml|css|html)/g) ?? [];
 }
 
 function quotedOrLastToken(prompt: string): string {
@@ -1079,6 +1405,10 @@ function describeToolInput(toolName: string, input: unknown): string {
   if (toolName === "edit_file") {
     return pathValue ? `${pathValue} edit` : "edit";
   }
+  if (toolName === "move_file") {
+    const newPath = typeof object["newPath"] === "string" ? object["newPath"] : undefined;
+    return pathValue && newPath ? `${pathValue} -> ${newPath}` : "move";
+  }
   if (toolName === "shell") {
     return compact(String(object["command"] ?? ""));
   }
@@ -1114,10 +1444,38 @@ function summarizeToolOutput(output: unknown): string {
   if (typeof object["numMatches"] === "number") {
     return `matched ${object["numMatches"]} lines`;
   }
+  if (object["kind"] === "delete") {
+    return `deleted ${String(object["path"] ?? "file")}`;
+  }
+  if (object["kind"] === "move") {
+    return `moved ${String(object["from"] ?? "file")} -> ${String(object["to"] ?? "file")}`;
+  }
+  if (object["kind"] === "exists") {
+    return `${object["exists"] ? "exists" : "missing"} ${String(object["path"] ?? "path")}`;
+  }
   if (typeof object["path"] === "string") {
     return `ok ${object["path"]}`;
   }
   return "ok";
+}
+
+function buildDeterministicToolText(execution: ToolExecution): string {
+  if (!execution.ok) {
+    return `${execution.toolName} failed: ${String(execution.output)}`;
+  }
+  const output = execution.output && typeof execution.output === "object" ? execution.output as Record<string, unknown> : {};
+  if (execution.toolName === "delete_file") {
+    return `Deleted ${String(output["path"] ?? "file")}.`;
+  }
+  if (execution.toolName === "move_file") {
+    return `Moved ${String(output["from"] ?? "file")} to ${String(output["to"] ?? "destination")}.`;
+  }
+  if (execution.toolName === "file_exists") {
+    const exists = output["exists"] === true ? "yes" : "no";
+    const type = typeof output["type"] === "string" ? ` (${output["type"]})` : "";
+    return `Exists: ${exists}${type}. ${String(output["path"] ?? "")}`.trim();
+  }
+  return summarizeToolOutput(execution.output);
 }
 
 function buildFallbackAssistantText(
@@ -1142,26 +1500,6 @@ function buildFallbackAssistantText(
     }
   }
   return lines.join("\n");
-}
-
-async function safeRagSearch(workspaceRoot: string, prompt: string, limit: number): Promise<RagSearchResult[]> {
-  try {
-    return await searchRag(workspaceRoot, prompt, limit);
-  } catch {
-    return [];
-  }
-}
-
-async function safeSkillMatch(workspaceRoot: string, prompt: string, limit: number): Promise<SkillMatch[]> {
-  try {
-    return await matchSkillsForPrompt(workspaceRoot, prompt, limit);
-  } catch {
-    return [];
-  }
-}
-
-function buildRuntimeContext(memoryEntries: MemoryEntry[], ragMatches: RagSearchResult[], skillMatches: SkillMatch[] = []): string {
-  return [buildMemoryContext(memoryEntries), buildRagContext(ragMatches), buildSkillsContext(skillMatches)].filter(Boolean).join("\n\n");
 }
 
 function buildFinalContext(runtimeContext: string, goals: ReturnType<typeof startTurnGoals>, reflection: ReflectionReport): string {
@@ -1190,10 +1528,12 @@ function systemPrompt(config: RuntimeConfig, runtimeContext = ""): string {
     "Do not claim you cannot read local files. Instead, explain that you can read, list, and search files inside the configured workspace when a path or file task is provided.",
     "You cannot access files outside the workspace unless the configured tools and permissions explicitly allow it.",
     "When tool results are present in the conversation, treat them as the source of truth and summarize them for the user.",
+    "When the user asks for generated content to be saved to a file, use write_file and keep the chat answer brief after the file is written.",
+    "When the requested output is a Markdown file and no filename is given, choose a concise relative .md filename such as output.md.",
     "Do not expose hidden chain-of-thought. Describe only observable actions and results.",
     `Workspace: ${path.resolve(config.workspaceRoot)}`,
     `Permission mode: ${config.permissionMode}`,
-    "Available local tools include read_file, list_dir, glob_search, grep_search, write_file, edit_file, shell, python_exec, python_run_file, python_write_and_run, python_analyze_result, python_last_result, python_clean_tmp, git_status, git_diff, changes_summary, checkpoint_create, revert_changes, git_commit_message, risk_analyze, task_plan, task_add, task_update, task_reset, task_resume, skill_list, skill_search, skill_read, skill_use, skill_create, skill_reload, skill_init, project_profile, validation_plan, parse_errors, symbol_index, symbol_search, find_definition, find_references, analyze_imports, call_graph, code_outline, project_init, context_monitor, resume_state, web_search, fetch_url, memory_search, memory_write, rag_index, rag_search, and ccr_retrieve depending on permissions.",
+    "Available local tools include read_file, list_dir, glob_search, grep_search, write_file, edit_file, delete_file, move_file, file_exists, shell, python_exec, python_run_file, python_write_and_run, python_analyze_result, python_last_result, python_clean_tmp, git_status, git_diff, changes_summary, checkpoint_create, revert_changes, git_commit_message, risk_analyze, task_plan, task_add, task_update, task_reset, task_resume, skill_list, skill_search, skill_read, skill_use, skill_create, skill_reload, skill_init, project_profile, validation_plan, parse_errors, symbol_index, symbol_search, find_definition, find_references, analyze_imports, call_graph, code_outline, project_init, context_monitor, resume_state, web_search, fetch_url, memory_search, memory_write, rag_index, rag_search, and ccr_retrieve depending on permissions.",
     runtimeContext ? `Runtime context:\n${runtimeContext}` : "Runtime context: none"
   ].join("\n");
 }

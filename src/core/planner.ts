@@ -1,4 +1,5 @@
 import path from "node:path";
+import { normalizeToolCallAlias } from "./toolAliases.js";
 import type { RoutedMatch, RuntimeConfig } from "./types.js";
 import { toolCatalog } from "../tools/registry.js";
 
@@ -133,6 +134,9 @@ export function buildPlanningSystemPrompt(
     "Choose tools when the user asks to read, list, search, edit, create, or run commands in the workspace.",
     "Do not say you cannot access local files. The runtime can execute the listed tools in the configured workspace.",
     "For file generation or code-writing requests, use write_file with the complete final file content.",
+    "When the user asks to save generated prose, reports, notes, or answers as Markdown, use write_file with a .md path and put the complete Markdown content in the file.",
+    "If the user requests a Markdown file but does not provide a filename, choose a concise relative filename such as output.md or a title-based .md filename.",
+    "After writing requested file content, keep final responses short and mention the file path instead of repeating the whole file.",
     "For existing-file changes, prefer read_file before edit_file unless the requested replacement is fully explicit.",
     "If the current tool observations are enough to answer, return an empty actions array.",
     "Never invent that a tool succeeded; only request tool actions and let the runtime execute them.",
@@ -179,18 +183,18 @@ export function parseAgentRoutePlan(text: string): AgentRoutePlan | undefined {
 }
 
 export function parseModelActionPlan(text: string): ModelActionPlan | undefined {
-  const jsonText = extractJsonObject(stripReasoningTags(stripCodeFence(text)).trim());
-  if (!jsonText) {
-    return undefined;
+  const normalizedText = stripReasoningTags(stripCodeFence(text)).trim();
+  const jsonText = extractJsonValue(normalizedText);
+  if (jsonText) {
+    try {
+      return normalizePlan(JSON.parse(jsonText));
+    } catch {
+      return undefined;
+    }
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch {
-    return undefined;
-  }
-  return normalizePlan(parsed);
+  const toolCallPlan = extractToolCallPlan(normalizedText);
+  return toolCallPlan?.actions.length ? toolCallPlan : undefined;
 }
 
 export function describePlan(plan: ModelActionPlan): string {
@@ -270,6 +274,10 @@ export function fallbackRouteFromMatches(routedMatches: RoutedMatch[]): AgentRou
 }
 
 function normalizePlan(value: unknown): ModelActionPlan | undefined {
+  if (Array.isArray(value)) {
+    const actions = normalizeActionArray(value);
+    return actions.length ? { actions } : undefined;
+  }
   if (!isRecord(value)) {
     return undefined;
   }
@@ -301,7 +309,9 @@ function normalizeRoutePlan(value: unknown): AgentRoutePlan | undefined {
   const knownTools = new Set(toolCatalog.map((tool) => tool.name));
   const rawTools = Array.isArray(value["tools"]) ? value["tools"] : [];
   const tools = rawTools
-    .filter((tool): tool is string => typeof tool === "string" && knownTools.has(tool))
+    .filter((tool): tool is string => typeof tool === "string")
+    .map((tool) => normalizeToolCallAlias(tool, {}).name)
+    .filter((tool) => knownTools.has(tool))
     .slice(0, 6);
   const reason = firstString(value["reason"], value["rationale"]);
   const routePlan: AgentRoutePlan = { intent, strategy, tools: uniqueTools(tools) };
@@ -318,25 +328,68 @@ function normalizeActions(value: Record<string, unknown>): ModelToolAction[] {
       ? [value]
       : [];
 
+  return normalizeActionArray(rawActions);
+}
+
+function normalizeActionArray(rawActions: unknown[]): ModelToolAction[] {
   const knownTools = new Set(toolCatalog.map((tool) => tool.name));
   const actions: ModelToolAction[] = [];
   for (const raw of rawActions.slice(0, 3)) {
     if (!isRecord(raw)) {
       continue;
     }
+    const input = isRecord(raw["input"])
+      ? raw["input"]
+      : isRecord(raw["arguments"])
+        ? raw["arguments"]
+        : {};
     const tool = firstString(raw["tool"], raw["name"], raw["toolName"]);
-    if (!tool || !knownTools.has(tool)) {
+    if (!tool) {
       continue;
     }
-    const input = isRecord(raw["input"]) ? raw["input"] : {};
+    const normalized = normalizeToolCallAlias(tool, input);
+    if (!knownTools.has(normalized.name)) {
+      continue;
+    }
     const reason = firstString(raw["reason"], raw["purpose"]);
-    const action: ModelToolAction = { tool, input };
+    const action: ModelToolAction = { tool: normalized.name, input: normalized.input };
     if (reason) {
       action.reason = reason;
     }
     actions.push(action);
   }
   return actions;
+}
+
+function extractToolCallPlan(value: string): ModelActionPlan | undefined {
+  const knownTools = new Set(toolCatalog.map((tool) => tool.name));
+  const actions: ModelToolAction[] = [];
+  const pattern = /([A-Za-z_][\w-]*)\s*\(([^)]*)\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(value)) !== null && actions.length < 3) {
+    const tool = match[1];
+    if (!tool || !knownTools.has(tool)) {
+      continue;
+    }
+    const input = parseCallArguments(match[2] ?? "");
+    actions.push({ tool, input });
+  }
+  return actions.length ? { actions } : undefined;
+}
+
+function parseCallArguments(value: string): Record<string, unknown> {
+  const input: Record<string, unknown> = {};
+  const pattern = /([A-Za-z_][\w-]*)\s*=\s*("[^"]*"|'[^']*'|[^,\s]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(value)) !== null) {
+    const key = match[1];
+    const raw = match[2]?.trim() ?? "";
+    if (!key) {
+      continue;
+    }
+    input[key] = raw.replace(/^["']|["']$/g, "");
+  }
+  return input;
 }
 
 function isSingleAction(value: Record<string, unknown>): boolean {
@@ -408,10 +461,22 @@ function stripReasoningTags(value: string): string {
 
 function extractJsonObject(value: string): string | undefined {
   const start = value.indexOf("{");
-  if (start < 0) {
+  return start >= 0 ? extractBalancedJson(value, start, "{", "}") : undefined;
+}
+
+function extractJsonValue(value: string): string | undefined {
+  const objectStart = value.indexOf("{");
+  const arrayStart = value.indexOf("[");
+  if (objectStart < 0 && arrayStart < 0) {
     return undefined;
   }
+  if (arrayStart >= 0 && (objectStart < 0 || arrayStart < objectStart)) {
+    return extractBalancedJson(value, arrayStart, "[", "]");
+  }
+  return extractBalancedJson(value, objectStart, "{", "}");
+}
 
+function extractBalancedJson(value: string, start: number, open: "{" | "[", close: "}" | "]"): string | undefined {
   let depth = 0;
   let inString = false;
   let escape = false;
@@ -432,9 +497,9 @@ function extractJsonObject(value: string): string | undefined {
     if (inString) {
       continue;
     }
-    if (char === "{") {
+    if (char === open) {
       depth += 1;
-    } else if (char === "}") {
+    } else if (char === close) {
       depth -= 1;
       if (depth === 0) {
         return value.slice(start, index + 1);

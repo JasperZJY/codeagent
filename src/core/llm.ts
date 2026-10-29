@@ -1,7 +1,24 @@
 import type { ConversationMessage, RuntimeConfig, ThinkingTrace, TokenUsage } from "./types.js";
 import { prepareMessagesForModel } from "./headroom.js";
 
-const DEFAULT_LLM_TIMEOUT_MS = 120000;
+const DEFAULT_LLM_TIMEOUT_MS = 300000;
+
+/** Marker appended to fallback answers when the provider call fails. */
+export const LLM_UNAVAILABLE_MARKER = "LLM unavailable:";
+
+/**
+ * Extract the failure detail from an assistant answer that fell back because the
+ * provider was unreachable. Returns undefined for ordinary answers.
+ */
+export function llmUnavailableReason(text: string): string | undefined {
+  const match = text.match(/LLM unavailable:\s*([^\r\n]+)/);
+  const reason = match?.[1]?.trim();
+  return reason || undefined;
+}
+
+function unavailableText(fallbackText: string, detail: string): string {
+  return `${fallbackText}\n\n${LLM_UNAVAILABLE_MARKER} ${detail}`;
+}
 
 interface ChatCompletionResponse {
   choices?: Array<{
@@ -67,7 +84,7 @@ export async function generateAssistantResult(
     return await openAiCompatibleCompletion(config, systemPrompt, preparedMessages, fallbackText, streamCallbacks);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { text: `${fallbackText}\n\nLLM unavailable: ${message}` };
+    return { text: unavailableText(fallbackText, message) };
   }
 }
 
@@ -102,10 +119,11 @@ async function openAiCompatibleCompletion(
       })
     });
     if (!response.ok) {
-      return { text: `${fallbackText}\n\nLLM unavailable: HTTP ${response.status}` };
+      return { text: unavailableText(fallbackText, `HTTP ${response.status}`) };
     }
+    timeout.refresh();
     if (callbacks.onTextDelta) {
-      return await readOpenAiCompatibleStream(response, callbacks, fallbackText);
+      return await readOpenAiCompatibleStream(response, callbacks, fallbackText, timeout);
     }
     const payload = (await response.json()) as ChatCompletionResponse;
     const message = payload.choices?.[0]?.message;
@@ -122,7 +140,7 @@ async function openAiCompatibleCompletion(
     };
   } catch (error) {
     if (timeout.isAborted()) {
-      throw new Error(`request timed out after ${timeout.ms}ms`);
+      throw new Error(timeout.errorMessage());
     }
     throw error;
   } finally {
@@ -133,7 +151,8 @@ async function openAiCompatibleCompletion(
 async function readOpenAiCompatibleStream(
   response: Response,
   callbacks: AssistantStreamCallbacks,
-  fallbackText: string
+  fallbackText: string,
+  timeout: LlmTimeout
 ): Promise<AssistantGenerationResult> {
   if (!response.body) {
     return { text: fallbackText };
@@ -156,6 +175,7 @@ async function readOpenAiCompatibleStream(
     if (done) {
       break;
     }
+    timeout.refresh();
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split(/\r?\n/);
     buffer = lines.pop() ?? "";
@@ -384,8 +404,9 @@ async function anthropicCompletion(
       })
     });
     if (!response.ok) {
-      return { text: `${fallbackText}\n\nLLM unavailable: HTTP ${response.status}` };
+      return { text: unavailableText(fallbackText, `HTTP ${response.status}`) };
     }
+    timeout.refresh();
     const payload = (await response.json()) as {
       content?: Array<{ type?: string; text?: string }>;
       usage?: { input_tokens?: number; output_tokens?: number };
@@ -405,7 +426,7 @@ async function anthropicCompletion(
     };
   } catch (error) {
     if (timeout.isAborted()) {
-      throw new Error(`request timed out after ${timeout.ms}ms`);
+      throw new Error(timeout.errorMessage());
     }
     throw error;
   } finally {
@@ -440,20 +461,50 @@ function usageFromOpenAi(usage: ChatCompletionResponse["usage"] | undefined): { 
   };
 }
 
-function createLlmTimeout(config: RuntimeConfig): {
+interface LlmTimeout {
   signal: AbortSignal;
   ms: number;
+  totalMs: number;
   isAborted: () => boolean;
+  refresh: () => void;
+  errorMessage: () => string;
   clear: () => void;
-} {
+}
+
+function createLlmTimeout(config: RuntimeConfig): LlmTimeout {
   const ms = Math.max(1, Math.floor(config.llmTimeoutMs ?? DEFAULT_LLM_TIMEOUT_MS));
+  const totalMs = Math.max(ms, Math.min(ms * 3, DEFAULT_LLM_TIMEOUT_MS));
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms);
+  let abortedBy: "idle" | "total" | undefined;
+  const abort = (reason: "idle" | "total") => {
+    if (controller.signal.aborted) {
+      return;
+    }
+    abortedBy = reason;
+    controller.abort();
+  };
+  let timer = setTimeout(() => abort("idle"), ms);
+  const totalTimer = setTimeout(() => abort("total"), totalMs);
+  const refresh = () => {
+    if (controller.signal.aborted) {
+      return;
+    }
+    clearTimeout(timer);
+    timer = setTimeout(() => abort("idle"), ms);
+  };
   return {
     signal: controller.signal,
     ms,
+    totalMs,
     isAborted: () => controller.signal.aborted,
-    clear: () => clearTimeout(timer)
+    refresh,
+    errorMessage: () => abortedBy === "total"
+      ? `request exceeded maximum duration after ${totalMs}ms`
+      : `request timed out after ${ms}ms`,
+    clear: () => {
+      clearTimeout(timer);
+      clearTimeout(totalTimer);
+    }
   };
 }
 

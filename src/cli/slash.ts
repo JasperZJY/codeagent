@@ -18,6 +18,7 @@ export type SlashCommandName =
   | "markdown"
   | "dialog-blocks"
   | "thinking"
+  | "timeout"
   | "summary"
   | "terminal-mode"
   | "copy"
@@ -60,9 +61,9 @@ export const slashCommandHelp: SlashCommandHelpEntry[] = [
   { usage: "/profile [list|current|name]", description: "List or switch configured provider/model profiles." },
   { usage: "/provider [name]", description: "Show or switch provider: openai-compatible or anthropic." },
   { usage: "/permissions [mode]", description: "Show or switch permission mode." },
-  { usage: "/session", description: "Show the active session summary." },
-  { usage: "/sessions", description: "List saved sessions for this workspace." },
-  { usage: "/resume <id>", description: "Resume an existing session." },
+  { usage: "/session [rename|summarize|id|refresh-title]", description: "Show or update the active session metadata." },
+  { usage: "/sessions [all|current-workspace|search]", description: "List saved sessions by title and summary." },
+  { usage: "/resume [selector]", description: "Switch to a saved session by number, title, or id." },
   { usage: "/compact [keep]", description: "Compress context and keep the latest N messages." },
   { usage: "/compress [keep]", description: "Alias for /compact." },
   { usage: "/goals", description: "Show active turn goals and monitoring status." },
@@ -75,6 +76,7 @@ export const slashCommandHelp: SlashCommandHelpEntry[] = [
   { usage: "/markdown on|off", description: "Toggle terminal Markdown rendering." },
   { usage: "/dialog-blocks on|off", description: "Toggle You/Agent dialog blocks." },
   { usage: "/thinking off|summary|verbose", description: "Control provider thinking display." },
+  { usage: "/timeout [ms]", description: "Show or set the LLM request/stream idle timeout in milliseconds." },
   { usage: "/summary auto|off|always", description: "Control final summary verbosity." },
   { usage: "/terminal-mode tui|scrollback", description: "Switch between fixed TUI and native scrollback mode." },
   { usage: "/copy last|turn|all|transcript|save", description: "Copy or save conversation content without ANSI." },
@@ -134,6 +136,7 @@ const aliases: Record<string, SlashCommandName> = {
   dialog: "dialog-blocks",
   thinking: "thinking",
   think: "thinking",
+  timeout: "timeout",
   summary: "summary",
   "terminal-mode": "terminal-mode",
   terminal: "terminal-mode",
@@ -174,7 +177,7 @@ export function parseSlashCommand(input: string): ParsedSlashCommand | undefined
 
   const body = trimmed.slice(1).trim();
   if (!body) {
-    return { name: "help", rawName: "help", args: [], rawArgs: "" };
+    return { name: "unknown", rawName: "", args: [], rawArgs: "" };
   }
 
   const firstSpace = body.search(/\s/);

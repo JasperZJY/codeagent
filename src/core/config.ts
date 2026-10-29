@@ -39,7 +39,11 @@ export interface ConfigOverrides {
 export interface RuntimeProfileConfig {
   provider?: string;
   model?: string;
+  /** Environment variable that overrides `model` when it is set. */
+  modelEnv?: string;
   baseUrl?: string;
+  /** Environment variable that overrides `baseUrl` when it is set. */
+  baseUrlEnv?: string;
   apiKey?: string;
   apiKeyEnv?: string;
   useLlm?: boolean;
@@ -85,9 +89,9 @@ type ConfigFile = Partial<{
 }>;
 
 export function loadRuntimeConfig(overrides: ConfigOverrides = {}): RuntimeConfig {
-  loadDotEnv(process.cwd());
-
   const workspaceRoot = path.resolve(overrides.workspaceRoot ?? process.cwd());
+  loadDotEnv(workspaceRoot);
+
   const fileConfig = loadConfigFiles(workspaceRoot);
   const explicitEndpointOverride =
     overrides.provider !== undefined ||
@@ -100,6 +104,8 @@ export function loadRuntimeConfig(overrides: ConfigOverrides = {}): RuntimeConfi
   const selectedProfile = selectedProfileName ? resolveProfile(fileConfig, selectedProfileName) : undefined;
   const availableProfiles = Object.keys(fileConfig.profiles ?? {}).sort();
   const profileApiKey = selectedProfile ? resolveProfileApiKey(selectedProfile) : undefined;
+  const profileBaseUrl = selectedProfile ? resolveProfileBaseUrl(selectedProfile) : undefined;
+  const profileModel = selectedProfile ? resolveProfileModel(selectedProfile) : undefined;
 
   const permissionMode = normalizePermissionMode(
     overrides.permissionMode ??
@@ -117,7 +123,7 @@ export function loadRuntimeConfig(overrides: ConfigOverrides = {}): RuntimeConfi
   const provider = normalizeProvider(
     overrides.provider ?? selectedProfile?.provider ?? fileConfig.provider ?? process.env["CODE_AGENT_PROVIDER"] ?? inferProvider()
   );
-  const providerDefaults = defaultsForProvider(provider);
+  const providerDefaults = defaultsForProvider(provider, !explicitEndpointOverride);
   const config: RuntimeConfig = {
     workspaceRoot,
     ...(selectedProfileName ? { profile: selectedProfileName } : {}),
@@ -125,13 +131,13 @@ export function loadRuntimeConfig(overrides: ConfigOverrides = {}): RuntimeConfi
     provider,
     model:
       overrides.model ??
-      selectedProfile?.model ??
+      profileModel ??
       fileConfig.model ??
       process.env["CODE_AGENT_MODEL"] ??
       providerDefaults.model,
     baseUrl:
       overrides.baseUrl ??
-      selectedProfile?.baseUrl ??
+      profileBaseUrl ??
       fileConfig.baseUrl ??
       process.env["CODE_AGENT_BASE_URL"] ??
       providerDefaults.baseUrl,
@@ -147,7 +153,7 @@ export function loadRuntimeConfig(overrides: ConfigOverrides = {}): RuntimeConfi
     maxBudgetTokens: positiveInt(overrides.maxBudgetTokens ?? fileConfig.maxBudgetTokens, 8000),
     llmTimeoutMs: positiveInt(
       overrides.llmTimeoutMs ?? fileConfig.llmTimeoutMs ?? readOptionalIntEnv("CODE_AGENT_LLM_TIMEOUT_MS"),
-      120000
+      300000
     ),
     useLlm: overrides.useLlm ?? selectedProfile?.useLlm ?? fileConfig.useLlm ?? false,
     verbose: overrides.verbose ?? fileConfig.verbose ?? readBooleanEnv("CODE_AGENT_VERBOSE"),
@@ -161,7 +167,7 @@ export function loadRuntimeConfig(overrides: ConfigOverrides = {}): RuntimeConfi
       overrides.terminalMode ?? fileConfig.ui?.terminalMode ?? process.env["CODE_AGENT_TERMINAL_MODE"] ?? "tui"
     ),
     thinkingDisplay: normalizeThinkingDisplayMode(
-      overrides.thinkingDisplay ?? fileConfig.ui?.thinkingDisplay ?? process.env["CODE_AGENT_THINKING_DISPLAY"] ?? "summary"
+      overrides.thinkingDisplay ?? fileConfig.ui?.thinkingDisplay ?? process.env["CODE_AGENT_THINKING_DISPLAY"] ?? "off"
     ),
     contextCompression: normalizeContextCompression(
       overrides.contextCompression ??
@@ -190,8 +196,8 @@ export function listRuntimeProfiles(workspaceRoot = process.cwd()): RuntimeProfi
     .map(([name, profile]) => ({
       name,
       provider: profile.provider ?? "",
-      model: profile.model ?? "",
-      baseUrl: profile.baseUrl ?? "",
+      model: resolveProfileModel(profile) ?? "",
+      baseUrl: resolveProfileBaseUrl(profile) ?? "",
       apiKeySource: profile.apiKey !== undefined
         ? "inline"
         : profile.apiKeyEnv
@@ -329,33 +335,36 @@ function inferProvider(): ProviderKind {
   return "openai-compatible";
 }
 
-function defaultsForProvider(provider: ProviderKind): { model: string; baseUrl: string; apiKey: string } {
+function defaultsForProvider(provider: ProviderKind, includeEnvironment: boolean): { model: string; baseUrl: string; apiKey: string } {
   if (provider === "anthropic") {
     return {
-      model: process.env["ANTHROPIC_MODEL"] ?? "claude-sonnet-4-6",
-      baseUrl: process.env["ANTHROPIC_BASE_URL"] ?? "https://api.anthropic.com",
-      apiKey: process.env["ANTHROPIC_API_KEY"] ?? process.env["ANTHROPIC_AUTH_TOKEN"] ?? ""
+      model: includeEnvironment ? process.env["ANTHROPIC_MODEL"] ?? "claude-sonnet-4-6" : "claude-sonnet-4-6",
+      baseUrl: includeEnvironment ? process.env["ANTHROPIC_BASE_URL"] ?? "https://api.anthropic.com" : "https://api.anthropic.com",
+      apiKey: includeEnvironment ? process.env["ANTHROPIC_API_KEY"] ?? process.env["ANTHROPIC_AUTH_TOKEN"] ?? "" : ""
     };
   }
   return {
-    model:
-      process.env["OPENAI_MODEL"] ??
-      process.env["DEEPSEEK_MODEL"] ??
-      process.env["OLLAMA_MODEL"] ??
-      process.env["DASHSCOPE_MODEL"] ??
-      "qwen3:8b",
-    baseUrl:
-      process.env["OPENAI_BASE_URL"] ??
-      process.env["DEEPSEEK_BASE_URL"] ??
-      process.env["OLLAMA_BASE_URL"] ??
-      process.env["DASHSCOPE_BASE_URL"] ??
-      "http://localhost:11434/v1",
-    apiKey:
-      process.env["OPENAI_API_KEY"] ??
-      process.env["DEEPSEEK_API_KEY"] ??
-      process.env["OLLAMA_API_KEY"] ??
-      process.env["DASHSCOPE_API_KEY"] ??
-      "ollama"
+    model: includeEnvironment
+      ? process.env["OPENAI_MODEL"] ??
+        process.env["DEEPSEEK_MODEL"] ??
+        process.env["OLLAMA_MODEL"] ??
+        process.env["DASHSCOPE_MODEL"] ??
+        "qwen3:8b"
+      : "qwen3:8b",
+    baseUrl: includeEnvironment
+      ? process.env["OPENAI_BASE_URL"] ??
+        process.env["DEEPSEEK_BASE_URL"] ??
+        process.env["OLLAMA_BASE_URL"] ??
+        process.env["DASHSCOPE_BASE_URL"] ??
+        "http://localhost:11434/v1"
+      : "http://localhost:11434/v1",
+    apiKey: includeEnvironment
+      ? process.env["OPENAI_API_KEY"] ??
+        process.env["DEEPSEEK_API_KEY"] ??
+        process.env["OLLAMA_API_KEY"] ??
+        process.env["DASHSCOPE_API_KEY"] ??
+        "ollama"
+      : "ollama"
   };
 }
 
@@ -388,6 +397,16 @@ function resolveProfileApiKey(profile: RuntimeProfileConfig): string | undefined
     return process.env[profile.apiKeyEnv] ?? "";
   }
   return undefined;
+}
+
+function resolveProfileBaseUrl(profile: RuntimeProfileConfig): string | undefined {
+  const fromEnv = profile.baseUrlEnv ? process.env[profile.baseUrlEnv]?.trim() : undefined;
+  return fromEnv || profile.baseUrl;
+}
+
+function resolveProfileModel(profile: RuntimeProfileConfig): string | undefined {
+  const fromEnv = profile.modelEnv ? process.env[profile.modelEnv]?.trim() : undefined;
+  return fromEnv || profile.model;
 }
 
 function readBooleanEnv(name: string): boolean {

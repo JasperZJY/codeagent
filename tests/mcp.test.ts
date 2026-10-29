@@ -24,6 +24,22 @@ test("mcp tools list exposes registered tools", async () => {
   assert.match(text, /read_file/);
   assert.match(text, /web_search/);
   assert.match(text, /ccr_retrieve/);
+  assert.match(text, /inputSchema/);
+});
+
+test("mcp tool calls still run through permission hooks", async () => {
+  const response = await handleMcpMessage(
+    {
+      jsonrpc: "2.0",
+      id: "call",
+      method: "tools/call",
+      params: { name: "shell", arguments: { command: "git reset --hard" } }
+    },
+    { ...fakeConfig(await workspace()), permissionMode: "danger-full-access" }
+  );
+  const text = JSON.stringify(response);
+  assert.match(text, /isError":true/);
+  assert.match(text, /command_risk_blocked/);
 });
 
 async function workspace(): Promise<string> {

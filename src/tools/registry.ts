@@ -1,17 +1,19 @@
-import { performance } from "node:perf_hooks";
-import { ChangeTracker, type MutationSnapshot } from "../core/changeTracker.js";
-import { authorizeTool, type ToolAuthorizationContext } from "../core/permissions.js";
-import { analyzeCommandRisk, isSensitivePath, redactSensitiveData, redactSensitiveText } from "../core/security.js";
-import type { ToolExecution, ToolSpec } from "../core/types.js";
+import type { ToolAuthorizationContext } from "../core/permissions.js";
+import { createDefaultHookManager, type HookManager } from "../core/hooks.js";
+import { ToolPipeline } from "../core/toolPipeline.js";
+import type { ToolDefinition, ToolExecution, ToolHandler, ToolPermission, ToolRisk, ToolSpec } from "../core/types.js";
 import { asObject } from "../utils/json.js";
 import { ccrRetrieveTool } from "./contextTools.js";
 import { memorySearchTool, memoryWriteTool } from "./memoryTools.js";
 import { ragIndexTool, ragSearchTool } from "./ragTools.js";
 import {
+  deleteFileTool,
   editFileTool,
+  fileExistsTool,
   globSearchTool,
   grepSearchTool,
   listDirTool,
+  moveFileTool,
   readFileTool,
   shellTool,
   writeFileTool
@@ -65,7 +67,7 @@ import {
   skillUseTool
 } from "./skillTools.js";
 
-export const toolCatalog: ToolSpec[] = [
+const builtinToolSpecs: ToolSpec[] = [
   {
     name: "read_file",
     description: "Read a UTF-8 text file inside the workspace.",
@@ -86,6 +88,33 @@ export const toolCatalog: ToolSpec[] = [
     requiredPermission: "workspace-write",
     routeHints: ["edit", "modify", "patch", "replace", "编辑", "修改", "补丁", "替换"],
     inputSchema: { type: "object", required: ["path", "oldString", "newString"] }
+  },
+  {
+    name: "delete_file",
+    description: "Delete a workspace file. Directories are refused.",
+    requiredPermission: "workspace-write",
+    permission: "write",
+    risk: "destructive",
+    routeHints: ["delete", "remove", "rm", "unlink", "delete file", "remove file"],
+    inputSchema: { type: "object", required: ["path"] }
+  },
+  {
+    name: "move_file",
+    description: "Move or rename a workspace file.",
+    requiredPermission: "workspace-write",
+    permission: "write",
+    risk: "write",
+    routeHints: ["move", "rename", "mv", "move file", "rename file"],
+    inputSchema: { type: "object", required: ["path", "newPath"] }
+  },
+  {
+    name: "file_exists",
+    description: "Check whether a workspace path exists without reading file content.",
+    requiredPermission: "read-only",
+    permission: "read",
+    risk: "safe",
+    routeHints: ["exists", "exist", "check file", "file exists", "path exists"],
+    inputSchema: { type: "object", required: ["path"] }
   },
   {
     name: "list_dir",
@@ -464,9 +493,84 @@ export const toolCatalog: ToolSpec[] = [
   }
 ];
 
+export class ToolRegistry {
+  private readonly tools = new Map<string, ToolDefinition>();
+
+  registerTool(tool: ToolDefinition): void {
+    this.tools.set(tool.name.toLowerCase(), tool);
+  }
+
+  unregisterTool(name: string): boolean {
+    return this.tools.delete(name.toLowerCase());
+  }
+
+  listTools(): ToolSpec[] {
+    return Array.from(this.tools.values()).map(withoutHandler);
+  }
+
+  getTool(name: string): ToolDefinition | undefined {
+    return this.tools.get(name.toLowerCase());
+  }
+
+  async executeTool(name: string, input: unknown, context: ToolAuthorizationContext, hooks?: HookManager): Promise<ToolExecution> {
+    return await new ToolPipeline(this, hooks ?? createDefaultHookManager()).executeToolCall({ name, input }, context);
+  }
+
+  schemaForModel(): Array<{ name: string; description: string; input_schema: Record<string, unknown> }> {
+    return this.listTools().map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: { type: "object", ...(tool.inputSchema ?? {}) }
+    }));
+  }
+
+  schemaForMcp(): Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> {
+    return this.listTools().map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: { type: "object", ...(tool.inputSchema ?? {}) }
+    }));
+  }
+
+  registerMcpTools(serverName: string, tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown>; handler: ToolHandler; risk?: ToolRisk }>): void {
+    const safeServer = normalizeMcpName(serverName);
+    for (const tool of tools) {
+      const name = `mcp__${safeServer}__${normalizeMcpName(tool.name)}`;
+      this.registerTool({
+        name,
+        description: tool.description ?? `MCP tool ${tool.name}`,
+        requiredPermission: tool.risk === "destructive" ? "danger-full-access" : "read-only",
+        permission: tool.risk === "destructive" ? "dangerous" : "network",
+        risk: tool.risk ?? "network",
+        inputSchema: tool.inputSchema ?? { type: "object", required: [] },
+        routeHints: [tool.name, serverName, name],
+        tags: ["mcp", serverName],
+        handler: tool.handler
+      });
+    }
+  }
+}
+
+export function createDefaultToolRegistry(): ToolRegistry {
+  const registry = new ToolRegistry();
+  for (const spec of builtinToolSpecs) {
+    registry.registerTool({
+      ...spec,
+      permission: spec.permission ?? inferPermission(spec),
+      risk: spec.risk ?? inferRisk(spec.name),
+      tags: spec.tags ?? inferTags(spec.name),
+      longRunning: spec.longRunning ?? isLongRunningTool(spec.name),
+      handler: async (input, context) => await dispatchTool(spec.name, input, context.workspaceRoot)
+    });
+  }
+  return registry;
+}
+
+export const defaultToolRegistry = createDefaultToolRegistry();
+export const toolCatalog: ToolSpec[] = defaultToolRegistry.listTools();
+
 export function findTool(name: string): ToolSpec | undefined {
-  const needle = name.toLowerCase();
-  return toolCatalog.find((tool) => tool.name === needle);
+  return defaultToolRegistry.listTools().find((tool) => tool.name === name.toLowerCase());
 }
 
 export async function executeTool(
@@ -474,83 +578,7 @@ export async function executeTool(
   input: unknown,
   context: ToolAuthorizationContext
 ): Promise<ToolExecution> {
-  const spec = findTool(name);
-  if (!spec) {
-    return {
-      toolName: name,
-      input,
-      ok: false,
-      output: `Unknown tool: ${name}`,
-      durationMs: 0
-    };
-  }
-
-  const started = performance.now();
-  const safeInput = redactSensitiveData(input);
-  const permission = authorizeTool(spec, input, context);
-  if (!permission.allowed) {
-    return {
-      toolName: spec.name,
-      input: safeInput,
-      ok: false,
-      output: redactSensitiveText(permission.reason),
-      durationMs: Math.round(performance.now() - started)
-    };
-  }
-
-  try {
-    const objectInput = asObject(input);
-    const riskBlocked = maybeBlockByRisk(spec.name, objectInput);
-    if (riskBlocked) {
-      return {
-        toolName: spec.name,
-        input: safeInput,
-        ok: false,
-        output: riskBlocked,
-        durationMs: Math.round(performance.now() - started)
-      };
-    }
-
-    const sensitiveBlocked = maybeBlockSensitiveRead(spec.name, objectInput);
-    if (sensitiveBlocked) {
-      return {
-        toolName: spec.name,
-        input: safeInput,
-        ok: false,
-        output: sensitiveBlocked,
-        durationMs: Math.round(performance.now() - started)
-      };
-    }
-
-    const tracker = new ChangeTracker(context.workspaceRoot);
-    let mutation: MutationSnapshot | undefined;
-    if (spec.name === "write_file" || spec.name === "edit_file") {
-      const filePath = typeof objectInput["path"] === "string" ? objectInput["path"] : undefined;
-      if (filePath) {
-        mutation = await tracker.snapshotBeforeMutation(context.checkpointId, filePath, spec.name);
-      }
-    }
-    const output = await dispatchTool(spec.name, objectInput, context.workspaceRoot);
-    if (mutation) {
-      await tracker.recordAfterMutation(mutation);
-    }
-    return {
-      toolName: spec.name,
-      input: safeInput,
-      ok: true,
-      output: redactSensitiveData(output),
-      durationMs: Math.round(performance.now() - started)
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      toolName: spec.name,
-      input: safeInput,
-      ok: false,
-      output: redactSensitiveText(message),
-      durationMs: Math.round(performance.now() - started)
-    };
-  }
+  return await defaultToolRegistry.executeTool(name, input, context);
 }
 
 async function dispatchTool(
@@ -565,6 +593,12 @@ async function dispatchTool(
       return await writeFileTool(input, workspaceRoot);
     case "edit_file":
       return await editFileTool(input, workspaceRoot);
+    case "delete_file":
+      return await deleteFileTool(input, workspaceRoot);
+    case "move_file":
+      return await moveFileTool(input, workspaceRoot);
+    case "file_exists":
+      return await fileExistsTool(input, workspaceRoot);
     case "list_dir":
       return await listDirTool(input, workspaceRoot);
     case "glob_search":
@@ -642,7 +676,7 @@ async function dispatchTool(
     case "fetch_url":
       return await fetchUrlTool(input);
     case "web_search":
-      return await webSearchTool(input);
+      return await webSearchTool(input, workspaceRoot);
     case "ccr_retrieve":
       return await ccrRetrieveTool(input, workspaceRoot);
     case "memory_search":
@@ -672,33 +706,96 @@ async function dispatchTool(
   }
 }
 
-function maybeBlockByRisk(toolName: string, input: Record<string, unknown>): unknown | undefined {
-  if (toolName !== "shell") {
-    return undefined;
-  }
-  const command = typeof input["command"] === "string" ? input["command"] : "";
-  const report = analyzeCommandRisk(command);
-  if (!report.blocked) {
-    return undefined;
-  }
-  return {
-    kind: "command_risk_blocked",
-    ...report,
-    message: "Command blocked by safety policy. Use /risk to inspect it; destructive and credential-risk commands require an explicit safer workflow."
-  };
+function withoutHandler(tool: ToolDefinition): ToolSpec {
+  const { handler: _handler, ...spec } = tool;
+  return spec;
 }
 
-function maybeBlockSensitiveRead(toolName: string, input: Record<string, unknown>): unknown | undefined {
-  if (toolName !== "read_file") {
-    return undefined;
+function inferPermission(spec: ToolSpec): ToolPermission {
+  if (spec.name === "fetch_url" || spec.name === "web_search" || spec.name.startsWith("mcp__")) {
+    return "network";
   }
-  const filePath = typeof input["path"] === "string" ? input["path"] : "";
-  if (!filePath || !isSensitivePath(filePath)) {
-    return undefined;
+  if (spec.name === "shell" || spec.name.startsWith("python_")) {
+    return "execute";
   }
-  return {
-    kind: "sensitive_path_blocked",
-    path: filePath,
-    message: "Sensitive files such as .env, SSH keys, cookies, and credential stores are not read by default."
-  };
+  if (spec.name === "revert_changes") {
+    return "dangerous";
+  }
+  if (spec.requiredPermission === "workspace-write") {
+    return "write";
+  }
+  if (spec.requiredPermission === "danger-full-access") {
+    return "dangerous";
+  }
+  return "read";
+}
+
+function inferRisk(name: string): ToolRisk {
+  if (name === "shell") {
+    return "system-risk";
+  }
+  if (name === "fetch_url" || name === "web_search" || name.startsWith("mcp__")) {
+    return "network";
+  }
+  if (name === "revert_changes" || name === "delete_file") {
+    return "destructive";
+  }
+  if (name.startsWith("python_")) {
+    return name === "python_risk" || name === "python_last_result" ? "safe" : "system-risk";
+  }
+  if (
+    name === "write_file" ||
+    name === "edit_file" ||
+    name === "move_file" ||
+    name === "checkpoint_create" ||
+    name.startsWith("task_") ||
+    name === "project_init" ||
+    name === "memory_write" ||
+    name === "rag_index" ||
+    name === "skill_create" ||
+    name === "skill_init"
+  ) {
+    return "write";
+  }
+  return "safe";
+}
+
+function inferTags(name: string): string[] {
+  if (name.startsWith("python_")) {
+    return ["python"];
+  }
+  if (name.startsWith("git_") || name.includes("checkpoint") || name === "changes_summary" || name === "revert_changes") {
+    return ["git"];
+  }
+  if (name.startsWith("task_")) {
+    return ["planning"];
+  }
+  if (name.startsWith("skill_")) {
+    return ["skills"];
+  }
+  if (name.startsWith("rag_") || name.startsWith("memory_") || name === "ccr_retrieve") {
+    return ["context"];
+  }
+  if (name.startsWith("symbol_") || name.startsWith("find_") || name === "analyze_imports" || name === "call_graph" || name === "code_outline") {
+    return ["code-intel"];
+  }
+  if (name === "fetch_url" || name === "web_search") {
+    return ["network"];
+  }
+  return ["workspace"];
+}
+
+function isLongRunningTool(name: string): boolean {
+  return [
+    "shell",
+    "python_run_file",
+    "python_write_and_run",
+    "rag_index",
+    "symbol_index",
+    "validation_plan"
+  ].includes(name);
+}
+
+function normalizeMcpName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, "_");
 }

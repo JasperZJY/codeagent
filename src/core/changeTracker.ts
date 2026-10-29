@@ -173,7 +173,11 @@ export class ChangeTracker {
         continue;
       }
       if (!currentExists) {
-        if (file.existedBefore) {
+        if (file.existedBefore && file.afterHash === hashText("")) {
+          await mkdir(path.dirname(file.absolutePath), { recursive: true });
+          await writeFile(file.absolutePath, file.beforeContent ?? "", "utf8");
+          reverted.push(file.path);
+        } else if (file.existedBefore) {
           skipped.push({ path: file.path, reason: "current file is missing; refusing to recreate unexpectedly" });
         } else {
           reverted.push(file.path);

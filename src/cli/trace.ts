@@ -350,7 +350,7 @@ function renderNormalTraceEvent(event: RuntimeTraceEvent, useColor: boolean, opt
     return naturalBlock(`Skill(${name})`, `Loaded skill workflow${event.detail ? `: ${event.detail}` : ""}`, useColor);
   }
   if (event.type === "info" && event.label === "thinking") {
-    if (options.thinkingDisplay === "off") {
+    if (!options.thinkingDisplay || options.thinkingDisplay === "off") {
       return "";
     }
     const detail = options.thinkingDisplay === "verbose" && event.detail
@@ -361,6 +361,9 @@ function renderNormalTraceEvent(event: RuntimeTraceEvent, useColor: boolean, opt
   if (event.type === "running") {
     if (event.label === "shell") {
       return naturalBlock(`Running ${commandFromInput(event.input)}`, "", useColor);
+    }
+    if (isUserVisibleTool(event.label)) {
+      return naturalBlock(`Using ${event.label}`, describeRunningToolInput(event.label, event.input), useColor);
     }
     return "";
   }
@@ -402,6 +405,9 @@ function renderToolExecutionSummary(
   }
   if (toolName === "write_file" || toolName === "edit_file") {
     return renderFileEdit(toolName, output, useColor);
+  }
+  if (toolName === "delete_file" || toolName === "move_file" || toolName === "file_exists") {
+    return renderFileOperation(toolName, output, useColor);
   }
   if (toolName === "git_diff") {
     return renderGitDiff(output, useColor, options);
@@ -486,6 +492,23 @@ function renderListDir(output: unknown, useColor: boolean): string {
   const dirPath = String(object["path"] ?? "workspace");
   const entries = Array.isArray(object["entries"]) ? object["entries"] : [];
   return naturalBlock("Listed workspace", `${highlightPath(dirPath, useColor)}\n${entries.length} entries`, useColor);
+}
+
+function renderFileOperation(toolName: string, output: unknown, useColor: boolean): string {
+  const object = asObject(output);
+  if (toolName === "delete_file") {
+    return naturalBlock("Deleted file", highlightPath(String(object["path"] ?? "file"), useColor), useColor);
+  }
+  if (toolName === "move_file") {
+    return naturalBlock(
+      "Moved file",
+      `${highlightPath(String(object["from"] ?? "file"), useColor)} -> ${highlightPath(String(object["to"] ?? "destination"), useColor)}`,
+      useColor
+    );
+  }
+  const exists = object["exists"] === true ? "yes" : "no";
+  const type = typeof object["type"] === "string" ? ` (${object["type"]})` : "";
+  return naturalBlock("Checked path", `${highlightPath(String(object["path"] ?? "path"), useColor)}\nexists: ${exists}${type}`, useColor);
 }
 
 function renderSearch(output: unknown, useColor: boolean, options: RenderTraceOptions): string {
@@ -1039,6 +1062,27 @@ function summarizeShellFailure(output: unknown): string {
   return extractErrorSummary(combined)[0] ?? "命令返回失败状态。";
 }
 
+function describeRunningToolInput(toolName: string, input: unknown): string {
+  const object = asObject(input);
+  if (typeof object["path"] === "string") {
+    return String(object["path"]);
+  }
+  if (typeof object["query"] === "string") {
+    return String(object["query"]);
+  }
+  if (typeof object["pattern"] === "string") {
+    return String(object["pattern"]);
+  }
+  if (toolName === "write_file" && typeof object["content"] === "string") {
+    return `${Buffer.byteLength(String(object["content"]), "utf8")} bytes`;
+  }
+  return "";
+}
+
+function isUserVisibleTool(label: string): boolean {
+  return !isInternalLabel(label);
+}
+
 function isValidationCommand(command: string): boolean {
   return /\b(npm\s+(run\s+)?(test|typecheck)|npm\s+test|pytest|py_compile|tsc|python\b.*py_compile)\b/i.test(command);
 }
@@ -1055,6 +1099,9 @@ function pastToolVerb(toolName: string): string {
     glob_search: "Matched files",
     write_file: "Edited file",
     edit_file: "Edited file",
+    delete_file: "Deleted file",
+    move_file: "Moved file",
+    file_exists: "Checked path",
     shell: "Ran command",
     python_exec: "Ran Python snippet",
     python_run_file: "Ran Python file",

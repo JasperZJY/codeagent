@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { compactSession } from "../src/core/context.js";
-import type { PersistedSession } from "../src/core/session.js";
+import { SessionStore, workspaceFingerprint, type PersistedSession } from "../src/core/session.js";
 import type { ConversationMessage, MessageRole } from "../src/core/types.js";
 
 test("compacts older messages and retains latest messages", () => {
@@ -32,6 +35,50 @@ test("skips compaction when there is not enough context", () => {
   const report = compactSession(session, 6);
   assert.equal(report.compacted, false);
   assert.equal(session.messages.length, 2);
+});
+
+test("stores sessions under a workspace fingerprint partition", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "code-agent-session-partition-"));
+  const store = new SessionStore(workspace);
+  const session = await store.loadOrCreate(undefined, "qwen3:8b");
+  const savedPath = await store.save(session);
+
+  assert.equal(path.dirname(savedPath), path.join(workspace, ".code-agent", "sessions", workspaceFingerprint(workspace)));
+  assert.equal(store.sessionsDirectory(), path.join(workspace, ".code-agent", "sessions", workspaceFingerprint(workspace)));
+});
+
+test("loads latest session aliases and legacy session files", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "code-agent-session-latest-"));
+  const store = new SessionStore(workspace);
+  const older = await store.loadOrCreate(undefined, "qwen3:8b");
+  older.updatedAt = "2026-06-16T00:00:00.000Z";
+  await mkdir(path.join(workspace, ".code-agent", "sessions"), { recursive: true });
+  await writeFile(path.join(workspace, ".code-agent", "sessions", `${older.sessionId}.json`), JSON.stringify(older, null, 2), "utf8");
+
+  const newer = await store.loadOrCreate(undefined, "qwen3:8b");
+  await store.save(newer);
+
+  const loadedLegacy = await store.load(older.sessionId);
+  const loadedLatest = await store.load("latest");
+  const listed = await store.list();
+
+  assert.equal(loadedLegacy?.sessionId, older.sessionId);
+  assert.equal(loadedLatest?.sessionId, newer.sessionId);
+  assert.deepEqual(listed.map((session) => session.sessionId), [newer.sessionId, older.sessionId]);
+});
+
+test("rejects explicit session loads from another workspace", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "code-agent-session-workspace-"));
+  const otherWorkspace = await mkdtemp(path.join(os.tmpdir(), "code-agent-session-other-"));
+  const otherStore = new SessionStore(otherWorkspace);
+  const other = await otherStore.loadOrCreate(undefined, "qwen3:8b");
+  await otherStore.save(other);
+
+  const currentStore = new SessionStore(workspace);
+  await mkdir(path.join(workspace, ".code-agent", "sessions"), { recursive: true });
+  await writeFile(path.join(workspace, ".code-agent", "sessions", `${other.sessionId}.json`), JSON.stringify(other, null, 2), "utf8");
+
+  await assert.rejects(() => currentStore.load(other.sessionId), /session_workspace_mismatch/);
 });
 
 function fakeSession(messages: ConversationMessage[]): PersistedSession {

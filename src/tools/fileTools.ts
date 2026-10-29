@@ -5,6 +5,8 @@ import {
   mkdir,
   readFile,
   readdir,
+  rename,
+  rm,
   stat,
   writeFile
 } from "node:fs/promises";
@@ -88,6 +90,78 @@ export async function editFileTool(input: Record<string, unknown>, workspaceRoot
     replaceAll,
     diff: makeLineDiff(original, updated)
   };
+}
+
+export async function deleteFileTool(input: Record<string, unknown>, workspaceRoot: string): Promise<unknown> {
+  const filePath = requireString(input, "path");
+  if (isSensitivePath(filePath)) {
+    throw new Error(`sensitive_path_blocked: ${filePath}`);
+  }
+  const absolute = resolveInWorkspace(workspaceRoot, filePath);
+  const metadata = await stat(absolute);
+  if (metadata.isDirectory()) {
+    throw new Error(`delete_file_refused_directory: ${filePath}`);
+  }
+  if (!metadata.isFile()) {
+    throw new Error(`delete_file_refused_non_file: ${filePath}`);
+  }
+  await rm(absolute);
+  return {
+    kind: "delete",
+    path: absolute,
+    existed: true
+  };
+}
+
+export async function moveFileTool(input: Record<string, unknown>, workspaceRoot: string): Promise<unknown> {
+  const sourcePath = requireFirstString(input, ["path", "from", "source"]);
+  const destinationPath = requireFirstString(input, ["newPath", "to", "destination"]);
+  if (isSensitivePath(sourcePath) || isSensitivePath(destinationPath)) {
+    throw new Error("sensitive_path_blocked");
+  }
+  const source = resolveInWorkspace(workspaceRoot, sourcePath);
+  const destination = resolveInWorkspace(workspaceRoot, destinationPath);
+  const metadata = await stat(source);
+  if (metadata.isDirectory()) {
+    throw new Error(`move_file_refused_directory: ${sourcePath}`);
+  }
+  if (!metadata.isFile()) {
+    throw new Error(`move_file_refused_non_file: ${sourcePath}`);
+  }
+  await mkdir(path.dirname(destination), { recursive: true });
+  await rename(source, destination);
+  return {
+    kind: "move",
+    from: source,
+    to: destination
+  };
+}
+
+export async function fileExistsTool(input: Record<string, unknown>, workspaceRoot: string): Promise<unknown> {
+  const filePath = requireString(input, "path");
+  if (isSensitivePath(filePath)) {
+    throw new Error(`sensitive_path_blocked: ${filePath}`);
+  }
+  const absolute = resolveInWorkspace(workspaceRoot, filePath);
+  try {
+    const metadata = await stat(absolute);
+    return {
+      kind: "exists",
+      path: absolute,
+      exists: true,
+      type: metadata.isDirectory() ? "dir" : metadata.isFile() ? "file" : "other"
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+    return {
+      kind: "exists",
+      path: absolute,
+      exists: false,
+      type: "missing"
+    };
+  }
 }
 
 export async function listDirTool(input: Record<string, unknown>, workspaceRoot: string): Promise<unknown> {
@@ -212,6 +286,16 @@ function requireString(input: Record<string, unknown>, key: string): string {
     throw new Error(`invalid_tool_input: '${key}' must be a non-empty string`);
   }
   return value;
+}
+
+function requireFirstString(input: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = input[key];
+    if (typeof value === "string" && value) {
+      return value;
+    }
+  }
+  throw new Error(`invalid_tool_input: one of '${keys.join("', '")}' must be a non-empty string`);
 }
 
 function optionalNumber(input: Record<string, unknown>, key: string): number | undefined {

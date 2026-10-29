@@ -35,8 +35,9 @@ export async function listSkills(workspaceRoot: string): Promise<AgentSkill[]> {
 
 export async function searchSkills(workspaceRoot: string, query: string): Promise<SkillMatch[]> {
   const normalized = query.toLowerCase();
+  const searchable = stripPathLikeSegments(normalized);
   return (await listSkills(workspaceRoot))
-    .map((skill) => scoreSkill(skill, normalized))
+    .map((skill) => scoreSkill(skill, normalized, searchable))
     .filter((match) => match.score > 0)
     .sort((left, right) => right.score - left.score || left.skill.name.localeCompare(right.skill.name));
 }
@@ -107,7 +108,7 @@ export function buildSkillsContext(matches: SkillMatch[]): string {
     return "";
   }
   return [
-    "Loaded skills:",
+    "Available relevant skills (catalog only; use skill_read or skill_use to load full workflow):",
     ...matches.map((match) => {
       const skill = match.skill;
       const tools = skill.tools.length ? skill.tools.join(", ") : "none";
@@ -116,7 +117,7 @@ export function buildSkillsContext(matches: SkillMatch[]): string {
         `  triggers: ${skill.triggers.join(", ") || "none"}`,
         `  tools: ${tools}`,
         `  risk: ${skill.risk}`,
-        `  workflow: ${extractSection(skill.body, "Workflow").replace(/\s+/g, " ").trim().slice(0, 700)}`
+        `  reason: ${match.reason}`
       ].join("\n");
     })
   ].join("\n");
@@ -186,16 +187,20 @@ function parseFrontmatter(value: string): Record<string, unknown> {
   return result;
 }
 
-function scoreSkill(skill: AgentSkill, normalizedQuery: string): SkillMatch {
-  const queryWords = normalizedQuery.match(/[a-z0-9_-]+|[\u4e00-\u9fff]+/gi) ?? [];
+function scoreSkill(skill: AgentSkill, normalizedQuery: string, searchableQuery: string): SkillMatch {
+  const explicitName = normalizedQuery.includes(skill.name.toLowerCase());
+  if (skill.name === "test-fix-loop" && !explicitName && !hasTestFixIntent(searchableQuery)) {
+    return { skill, score: 0, reason: "no test-fix intent" };
+  }
+  const queryWords = searchableQuery.match(/[a-z0-9_-]+|[\u4e00-\u9fff]+/gi) ?? [];
   let score = 0;
   const reasons: string[] = [];
-  if (normalizedQuery.includes(skill.name.toLowerCase())) {
+  if (explicitName) {
     score += 40;
     reasons.push("name");
   }
   for (const trigger of skill.triggers) {
-    if (trigger && normalizedQuery.includes(trigger.toLowerCase())) {
+    if (trigger && searchableQuery.includes(trigger.toLowerCase())) {
       score += 20;
       reasons.push(`trigger:${trigger}`);
     }
@@ -207,6 +212,14 @@ function scoreSkill(skill: AgentSkill, normalizedQuery: string): SkillMatch {
     }
   }
   return { skill, score, reason: reasons.join(", ") || "content match" };
+}
+
+function stripPathLikeSegments(value: string): string {
+  return value.replace(/(?:\.{1,2}[\\/]|[a-z]:[\\/]|[\w.-]+[\\/])[\w./\\-]+|[\w.-]+\.(?:ts|tsx|js|json|py|md|rs|toml|txt|yaml|yml|css|html)/gi, " ");
+}
+
+function hasTestFixIntent(value: string): boolean {
+  return /\b(test|typecheck|lint|build|failing|failed|failure|fix|pytest|tsc)\b|测试|报错|失败|修复|验证/.test(value);
 }
 
 function normalizeSkillName(value: string): string {

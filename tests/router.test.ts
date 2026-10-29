@@ -36,9 +36,21 @@ test("routes Chinese write request to write_file first", () => {
   assert.equal(matches[0]?.name, "write_file");
 });
 
+test("routes Chinese Markdown save request to write_file first", () => {
+  const matches = routePrompt("给我写一篇1000字小说，内容保存到md文件中", 5);
+  assert.equal(matches[0]?.kind, "tool");
+  assert.equal(matches[0]?.name, "write_file");
+});
+
 test("routes URL and internet search prompts to web tools", () => {
   assert.equal(routePrompt("读取 https://example.com", 5).some((match) => match.name === "fetch_url"), true);
   const matches = routePrompt("上网搜索最新 TypeScript MCP 示例", 5);
+  assert.equal(matches[0]?.kind, "tool");
+  assert.equal(matches[0]?.name, "web_search");
+});
+
+test("routes Chinese news questions to web search", () => {
+  const matches = routePrompt("今天发生了什么新闻", 5);
   assert.equal(matches[0]?.kind, "tool");
   assert.equal(matches[0]?.name, "web_search");
 });

@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import {
   backSlashMenu,
   completeSlashMenuSelection,
+  completeSlashMenuSelectionForConfig,
   createSlashMenuState,
   enterSlashMenuSelection,
   filteredSlashMenuItems,
   moveSlashMenuSelection,
   renderSlashMenu,
+  slashMenuInputPrefix,
   updateSlashMenuFilterFromInput
 } from "../src/cli/slashMenu.js";
 import type { RuntimeConfig } from "../src/core/types.js";
@@ -16,7 +18,7 @@ test("slash menu renders root commands", () => {
   const output = renderSlashMenu(createSlashMenuState(), 80);
   const labels = filteredSlashMenuItems(createSlashMenuState()).map((item) => item.label);
   assert.match(output, /Commands/);
-  assert.match(output, /python/);
+  assert.equal(labels.includes("python"), true);
   assert.equal(labels.includes("skills"), true);
 });
 
@@ -53,6 +55,70 @@ test("keyword filtering narrows menu", () => {
   const items = filteredSlashMenuItems(state);
   assert.equal(items.length, 1);
   assert.equal(items[0]?.id, "skills");
+});
+
+test("root menu exposes command aliases before description matches", () => {
+  let state = updateSlashMenuFilterFromInput("/per", createSlashMenuState());
+  let items = filteredSlashMenuItems(state);
+  assert.equal(items[0]?.id, "permissions");
+  assert.equal(items.some((item) => item.id === "memory"), true);
+
+  state = updateSlashMenuFilterFromInput("/re", createSlashMenuState());
+  items = filteredSlashMenuItems(state);
+  assert.equal(items[0]?.id, "resume");
+});
+
+test("permissions menu offers selectable permission modes", () => {
+  const state = enterSlashMenuSelection(updateSlashMenuFilterFromInput("/per", createSlashMenuState()), fakeConfig()).state;
+  assert.deepEqual(state.path, ["permissions"]);
+  assert.equal(slashMenuInputPrefix(state), "/permissions ");
+
+  const items = filteredSlashMenuItems(state, fakeConfig());
+  assert.deepEqual(items.map((item) => item.label), ["workspace-write", "read-only", "danger-full-access"]);
+
+  const dangerState = updateSlashMenuFilterFromInput("/permissions danger", state);
+  assert.equal(filteredSlashMenuItems(dangerState, fakeConfig())[0]?.id, "danger-full-access");
+  assert.equal(completeSlashMenuSelectionForConfig(dangerState, fakeConfig()), "/permissions danger-full-access");
+});
+
+test("resume menu offers session selector shortcuts", () => {
+  const state = enterSlashMenuSelection(updateSlashMenuFilterFromInput("/re", createSlashMenuState()), fakeConfig()).state;
+  assert.deepEqual(state.path, ["resume"]);
+  assert.equal(slashMenuInputPrefix(state), "/resume ");
+
+  const items = filteredSlashMenuItems(state, fakeConfig());
+  assert.deepEqual(items.map((item) => item.id), [
+    "latest",
+    "list",
+    "number",
+    "title",
+    "session-id",
+    "task",
+    "allow-workspace"
+  ]);
+
+  const latestState = updateSlashMenuFilterFromInput("/resume lat", state);
+  assert.equal(filteredSlashMenuItems(latestState, fakeConfig())[0]?.id, "latest");
+  assert.equal(completeSlashMenuSelectionForConfig(latestState, fakeConfig()), "/resume latest");
+
+  const taskState = updateSlashMenuFilterFromInput("/resume task", state);
+  assert.equal(filteredSlashMenuItems(taskState, fakeConfig())[0]?.id, "task");
+  assert.equal(completeSlashMenuSelectionForConfig(taskState, fakeConfig()), "/resume-task");
+
+  const idState = updateSlashMenuFilterFromInput("/resume id", state);
+  assert.equal(filteredSlashMenuItems(idState, fakeConfig())[0]?.id, "session-id");
+  assert.equal(completeSlashMenuSelectionForConfig(idState, fakeConfig()), "/resume ");
+});
+
+test("settings permissions submenu still completes real permissions commands", () => {
+  const settingsState = enterSlashMenuSelection(updateSlashMenuFilterFromInput("/settings", createSlashMenuState()), fakeConfig()).state;
+  const permissionsState = enterSlashMenuSelection(updateSlashMenuFilterFromInput("/settings per", settingsState), fakeConfig()).state;
+  assert.deepEqual(permissionsState.path, ["settings", "permissions"]);
+  assert.equal(slashMenuInputPrefix(permissionsState), "/permissions ");
+
+  const readOnlyState = updateSlashMenuFilterFromInput("/permissions read", permissionsState);
+  assert.equal(filteredSlashMenuItems(readOnlyState, fakeConfig())[0]?.id, "read-only");
+  assert.equal(completeSlashMenuSelectionForConfig(readOnlyState, fakeConfig()), "/permissions read-only");
 });
 
 test("single-letter slash filtering prioritizes command labels over descriptions", () => {

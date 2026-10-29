@@ -51,10 +51,16 @@ test("normal trace hides reflection policy debug but shows skill load", () => {
   assert.match(output, /Skill\(python-data-analysis\)/);
 });
 
-test("normal trace renders thinking as collapsed summary", () => {
-  const output = renderTrace(
+test("normal trace hides thinking unless summary display is enabled", () => {
+  const hidden = renderTrace(
     [{ type: "info", label: "thinking", detail: "reasoning_content: 42 chars hidden" }],
     false
+  );
+  assert.equal(hidden, "");
+  const output = renderTrace(
+    [{ type: "info", label: "thinking", detail: "reasoning_content: 42 chars hidden" }],
+    false,
+    { thinkingDisplay: "summary" }
   );
   assert.match(output, /Thinking/);
   assert.match(output, /reasoning received, hidden by default/);
@@ -113,6 +119,21 @@ test("renders natural file read and shell summaries", () => {
   assert.match(output, /96 lines/);
   assert.match(output, /● Ran npm run typecheck/);
   assert.match(output, /Passed in 2\.3s/);
+});
+
+test("normal trace renders tool start for visible tools", () => {
+  const output = renderTrace(
+    [
+      {
+        type: "running",
+        label: "write_file",
+        input: { path: "demo01.py", content: "print(1)\n" }
+      }
+    ],
+    false
+  );
+  assert.match(output, /● Using write_file/);
+  assert.match(output, /demo01\.py/);
 });
 
 test("renders python execution summaries", () => {

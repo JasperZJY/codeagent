@@ -45,6 +45,25 @@ test("checkpoint revert deletes agent-created files", async () => {
   await assert.rejects(() => readFile(path.join(workspace, "created.txt"), "utf8"));
 });
 
+test("checkpoint revert restores files deleted by agent tools", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "code-agent-revert-deleted-"));
+  await writeFile(path.join(workspace, "old.txt"), "baseline\n", "utf8");
+  const tracker = new ChangeTracker(workspace);
+  const checkpoint = await tracker.createCheckpoint({ reason: "test" });
+
+  const deleted = await executeTool(
+    "delete_file",
+    { path: "old.txt" },
+    { permissionMode: "workspace-write", workspaceRoot: workspace, checkpointId: checkpoint.id }
+  );
+  assert.equal(deleted.ok, true);
+  await assert.rejects(() => readFile(path.join(workspace, "old.txt"), "utf8"));
+
+  const reverted = await tracker.revertLatest();
+  assert.deepEqual(reverted.reverted, ["old.txt"]);
+  assert.equal(await readFile(path.join(workspace, "old.txt"), "utf8"), "baseline\n");
+});
+
 test("checkpoint revert skips files changed after agent write", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "code-agent-revert-skip-"));
   await writeFile(path.join(workspace, "note.txt"), "before\n", "utf8");

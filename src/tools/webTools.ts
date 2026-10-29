@@ -1,4 +1,13 @@
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 const DEFAULT_FETCH_BYTES = 20000;
+const WEB_SEARCH_ENV_KEYS = new Set([
+  "BAIDU_AI_SEARCH_API_KEY",
+  "CODE_AGENT_WEB_SEARCH_API_KEY",
+  "CODE_AGENT_WEB_SEARCH_PROVIDER"
+]);
 
 export async function fetchUrlTool(input: Record<string, unknown>): Promise<unknown> {
   const url = requireString(input, "url");
@@ -20,22 +29,27 @@ export async function fetchUrlTool(input: Record<string, unknown>): Promise<unkn
   };
 }
 
-export async function webSearchTool(input: Record<string, unknown>): Promise<unknown> {
+export async function webSearchTool(input: Record<string, unknown>, workspaceRoot?: string): Promise<unknown> {
   const query = requireString(input, "query");
-  const provider = String(input["provider"] ?? process.env["CODE_AGENT_WEB_SEARCH_PROVIDER"] ?? "baidu-ai");
+  const env = webSearchEnv(workspaceRoot);
+  const provider = String(input["provider"] ?? envValue(env, "CODE_AGENT_WEB_SEARCH_PROVIDER") ?? "baidu-ai");
+  if (provider === "mock") {
+    return { provider: "mock", query, result: `Mock search result for ${query}` };
+  }
   if (provider !== "baidu-ai") {
     throw new Error(`unsupported_web_search_provider: ${provider}`);
   }
-  return await baiduAiSearch(query);
+  return await baiduAiSearch(query, env);
 }
 
-async function baiduAiSearch(query: string): Promise<unknown> {
-  const apiKey =
-    process.env["BAIDU_AI_SEARCH_API_KEY"] ??
-    process.env["CODE_AGENT_WEB_SEARCH_API_KEY"];
+async function baiduAiSearch(query: string, env: WebSearchEnv): Promise<unknown> {
+  const apiKey = firstNonEmpty(
+    envValue(env, "BAIDU_AI_SEARCH_API_KEY"),
+    envValue(env, "CODE_AGENT_WEB_SEARCH_API_KEY")
+  );
   if (!apiKey) {
     throw new Error(
-      "web_search_unconfigured: set BAIDU_AI_SEARCH_API_KEY or CODE_AGENT_WEB_SEARCH_API_KEY"
+      "web_search_unconfigured: set BAIDU_AI_SEARCH_API_KEY or CODE_AGENT_WEB_SEARCH_API_KEY in the current workspace .env"
     );
   }
   const response = await fetch("https://qianfan.baidubce.com/v2/ai_search/chat/completions", {
@@ -58,6 +72,59 @@ async function baiduAiSearch(query: string): Promise<unknown> {
     query,
     result: payload
   };
+}
+
+interface WebSearchEnv {
+  process: NodeJS.ProcessEnv;
+  project: Partial<Record<string, string>>;
+  workspace: Partial<Record<string, string>>;
+}
+
+function webSearchEnv(workspaceRoot: string | undefined): WebSearchEnv {
+  return {
+    process: process.env,
+    project: loadWorkspaceWebSearchEnv(projectRoot()),
+    workspace: loadWorkspaceWebSearchEnv(workspaceRoot)
+  };
+}
+
+function loadWorkspaceWebSearchEnv(workspaceRoot: string | undefined): Partial<Record<string, string>> {
+  if (!workspaceRoot) {
+    return {};
+  }
+  const envPath = path.join(workspaceRoot, ".env");
+  if (!existsSync(envPath)) {
+    return {};
+  }
+  const values: Partial<Record<string, string>> = {};
+  for (const line of readFileSync(envPath, "utf8").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const separator = trimmed.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+    const key = trimmed.slice(0, separator).trim();
+    if (!WEB_SEARCH_ENV_KEYS.has(key)) {
+      continue;
+    }
+    values[key] = trimmed.slice(separator + 1).trim().replace(/^["']|["']$/g, "");
+  }
+  return values;
+}
+
+function projectRoot(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+}
+
+function envValue(env: WebSearchEnv, key: string): string | undefined {
+  return env.workspace[key] ?? env.project[key] ?? env.process[key];
+}
+
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  return values.find((value) => value !== undefined && value.trim() !== "");
 }
 
 function requireString(input: Record<string, unknown>, key: string): string {

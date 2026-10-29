@@ -5,7 +5,7 @@ import { constants } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { initializeBuiltinSkills, listSkills, matchSkillsForPrompt, readSkill, searchSkills } from "../src/core/skills.js";
+import { buildSkillsContext, initializeBuiltinSkills, listSkills, matchSkillsForPrompt, readSkill, searchSkills } from "../src/core/skills.js";
 import { executeTool } from "../src/tools/registry.js";
 
 test("skill_list includes built-in skills", async () => {
@@ -39,6 +39,22 @@ test("unmatched prompt does not load a skill", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "code-agent-skills-none-"));
   const matches = await matchSkillsForPrompt(workspace, "hello");
   assert.equal(matches.length, 0);
+});
+
+test("path-like filenames do not trigger test-fix skill by token accident", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "code-agent-skills-path-noise-"));
+  const matches = await matchSkillsForPrompt(workspace, "delete tmp_secret_test.txt");
+  assert.equal(matches.some((match) => match.skill.name === "test-fix-loop"), false);
+  assert.equal(matches.length, 0);
+});
+
+test("skill catalog context does not inject full workflow by default", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "code-agent-skills-catalog-"));
+  const matches = await matchSkillsForPrompt(workspace, "write a python script to count files");
+  const context = buildSkillsContext(matches);
+  assert.match(context, /catalog only/);
+  assert.doesNotMatch(context, /workflow:/i);
+  assert.doesNotMatch(context, /step-by-step/i);
 });
 
 test("skills init creates built-in skill files in workspace", async () => {

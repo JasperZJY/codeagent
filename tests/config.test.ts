@@ -106,6 +106,81 @@ test("explicit endpoint overrides do not inherit default profile endpoint", asyn
   assert.equal(config.model, "claude-sonnet-4-6");
 });
 
+test("profile endpoint and model are overridable per profile through env vars", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "code-agent-config-env-"));
+  await writeFile(
+    path.join(workspace, ".code-agent.json"),
+    JSON.stringify({
+      defaultProfile: "ollama",
+      profiles: {
+        ollama: {
+          provider: "openai-compatible",
+          baseUrl: "http://localhost:11434/v1",
+          baseUrlEnv: "TEST_OLLAMA_BASE_URL",
+          model: "qwen3:8b",
+          modelEnv: "TEST_OLLAMA_MODEL"
+        },
+        deepseek: {
+          provider: "openai-compatible",
+          baseUrl: "https://api.deepseek.com",
+          model: "deepseek-chat"
+        }
+      }
+    }),
+    "utf8"
+  );
+
+  const previousBase = process.env["TEST_OLLAMA_BASE_URL"];
+  const previousModel = process.env["TEST_OLLAMA_MODEL"];
+  process.env["TEST_OLLAMA_BASE_URL"] = "http://192.168.1.105:11434/v1";
+  process.env["TEST_OLLAMA_MODEL"] = "qwen3.6:27b";
+  try {
+    const local = loadRuntimeConfig({ workspaceRoot: workspace });
+    assert.equal(local.baseUrl, "http://192.168.1.105:11434/v1");
+    assert.equal(local.model, "qwen3.6:27b");
+
+    // The override belongs to one profile and must not leak into another.
+    const remote = loadRuntimeConfig({ workspaceRoot: workspace, profile: "deepseek" });
+    assert.equal(remote.baseUrl, "https://api.deepseek.com");
+    assert.equal(remote.model, "deepseek-chat");
+
+    const profiles = listRuntimeProfiles(workspace);
+    assert.equal(profiles.profiles.find((profile) => profile.name === "ollama")?.baseUrl, "http://192.168.1.105:11434/v1");
+  } finally {
+    for (const [key, value] of [["TEST_OLLAMA_BASE_URL", previousBase], ["TEST_OLLAMA_MODEL", previousModel]] as const) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+});
+
+test("profile falls back to its committed endpoint when the env var is unset", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "code-agent-config-env-unset-"));
+  await writeFile(
+    path.join(workspace, ".code-agent.json"),
+    JSON.stringify({
+      profiles: {
+        ollama: {
+          provider: "openai-compatible",
+          baseUrl: "http://localhost:11434/v1",
+          baseUrlEnv: "TEST_UNSET_BASE_URL",
+          model: "qwen3:8b",
+          modelEnv: "TEST_UNSET_MODEL"
+        }
+      },
+      defaultProfile: "ollama"
+    }),
+    "utf8"
+  );
+
+  const config = loadRuntimeConfig({ workspaceRoot: workspace });
+  assert.equal(config.baseUrl, "http://localhost:11434/v1");
+  assert.equal(config.model, "qwen3:8b");
+});
+
 test("missing runtime profile throws a clear error", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "code-agent-config-missing-"));
   await writeFile(path.join(workspace, ".code-agent.json"), JSON.stringify({ profiles: {} }), "utf8");

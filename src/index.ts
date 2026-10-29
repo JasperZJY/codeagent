@@ -17,6 +17,7 @@ import { commandCatalog } from "./core/catalog.js";
 import { loadRuntimeConfig } from "./core/config.js";
 import { routePrompt } from "./core/router.js";
 import { AgentRuntime } from "./core/runtime.js";
+import type { TurnSummary } from "./core/types.js";
 import { runMcpServer } from "./mcp/server.js";
 import { toolCatalog } from "./tools/registry.js";
 import { parseJsonPayload } from "./utils/json.js";
@@ -69,12 +70,16 @@ async function main(argv: string[]): Promise<void> {
     case "route":
       console.log(renderMatches(routePrompt(parsed.action.prompt, parsed.action.limit), config.outputFormat));
       return;
-    case "bootstrap":
-      console.log(render(await runtime.bootstrap(parsed.action.prompt, parsed.action.limit), config.outputFormat));
+    case "bootstrap": {
+      const report = await runtime.bootstrap(parsed.action.prompt, parsed.action.limit);
+      console.log(render(report, config.outputFormat));
+      applyLlmFailure([report.turn]);
       return;
+    }
     case "turn-loop": {
       const turns = await runtime.runTurnLoop(parsed.action.prompt, parsed.action.limit);
       console.log(render(turns, config.outputFormat));
+      applyLlmFailure(turns);
       return;
     }
     case "prompt": {
@@ -86,6 +91,7 @@ async function main(argv: string[]): Promise<void> {
         useColor: Boolean(process.stdout.isTTY && process.env["NO_COLOR"] !== "1"),
         width: Math.max(40, process.stdout.columns ?? 100)
       }));
+      applyLlmFailure([turn]);
       return;
     }
     case "exec-tool": {
@@ -106,6 +112,19 @@ async function main(argv: string[]): Promise<void> {
       console.log(render(runDoctor(config), config.outputFormat));
       return;
   }
+}
+
+/**
+ * A fallback answer is still printed, but the process must not report success:
+ * scripts and CI have to be able to tell "model answered" from "model was down".
+ */
+function applyLlmFailure(turns: TurnSummary[]): void {
+  const failure = turns.find((turn) => turn.llmFailure !== undefined)?.llmFailure;
+  if (failure === undefined) {
+    return;
+  }
+  process.exitCode = 1;
+  console.error(`error: llm_unavailable: ${failure}`);
 }
 
 function renderList<T extends { name: string; description: string }>(

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Writable } from "node:stream";
-import { renderMarkdownForTerminal } from "../src/cli/markdownRenderer.js";
+import { renderMarkdownForTerminal, stripAnsi } from "../src/cli/markdownRenderer.js";
 import { renderAgentStreamHeader } from "../src/cli/terminalBlocks.js";
 import { TerminalUi, renderCommandPalette, renderInputBox } from "../src/cli/terminalUi.js";
 import type { PersistedSession } from "../src/core/session.js";
@@ -32,6 +32,20 @@ test("renders streamed text above the composer", () => {
 
   assert.match(output.value, /hello world/);
   assert.match(output.value, /› next prompt/);
+});
+
+test("renders buffered streamed markdown before closing the agent block", () => {
+  const output = new CaptureOutput();
+  const ui = new TerminalUi(fakeConfig(), fakeSession(), output);
+  ui.appendLine(renderAgentStreamHeader({ enabled: true, useColor: false, width: 48 }));
+  ui.appendLine("");
+  ui.appendBlock(renderMarkdownForTerminal("### 标题\n\n* **重点**：内容", { enabled: true, useColor: true, width: 48 }));
+  ui.renderNow();
+
+  const plain = stripAnsi(output.value);
+  assert.match(plain, /标题/);
+  assert.match(plain, /• 重点：内容/);
+  assert.doesNotMatch(plain, /\*\*重点\*\*/);
 });
 
 test("keeps first streamed agent token off the dialog header line", () => {

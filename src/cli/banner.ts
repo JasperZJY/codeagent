@@ -2,7 +2,8 @@ import path from "node:path";
 import type { ContextCompactionReport } from "../core/context.js";
 import type { MemoryEntry } from "../core/memory.js";
 import type { RagSearchResult } from "../core/rag.js";
-import type { PersistedSession } from "../core/session.js";
+import { toSessionMetadata } from "../core/sessionManager.js";
+import { workspaceFingerprint, type PersistedSession } from "../core/session.js";
 import type {
   AgentGoal,
   AgentTaskPlan,
@@ -36,7 +37,8 @@ export function renderStatus(config: RuntimeConfig, session: PersistedSession): 
     ["Model", config.model],
     ["Permissions", config.permissionMode],
     ["Workspace", path.resolve(config.workspaceRoot)],
-    ["Session", session.sessionId],
+    ["Session", session.title ?? session.sessionId],
+    ["Session id", shortId(session.sessionId)],
     ["Messages", String(session.messages.length)],
     ["Usage", `input=${session.usage.inputTokens} output=${session.usage.outputTokens}`],
     ["Dialog blocks", config.dialogBlocks === false ? "off" : "on"],
@@ -57,35 +59,43 @@ export function renderInteractiveHelp(): string {
 }
 
 export function renderSessionSummary(config: RuntimeConfig, session: PersistedSession): string {
-  return renderRows([
-    ["Session", session.sessionId],
-    ["Created", session.createdAt],
-    ["Updated", session.updatedAt],
-    ["Workspace", session.workspaceRoot],
-    ["Runtime model", config.model],
-    ["Runtime profile", config.profile ?? "default"],
-    ["Session model", session.model],
-    ["Messages", String(session.messages.length)],
-    ["Prompts", String(session.promptHistory.length)],
-    ["Usage", `input=${session.usage.inputTokens} output=${session.usage.outputTokens}`],
-    ["Path", sessionPath(config, session)]
-  ]);
+  return [
+    "Current session:",
+    renderRows([
+      ["Title", session.title ?? session.sessionId],
+      ["Summary", session.summary ?? "none"],
+      ["Session id", session.sessionId],
+      ["Messages", String(session.messages.length)],
+      ["Created", session.createdAt],
+      ["Updated", session.updatedAt],
+      ["Workspace", session.workspaceRoot],
+      ["Profile", session.profile ?? config.profile ?? "default"],
+      ["Provider", session.provider ?? config.provider],
+      ["Model", session.model ?? config.model],
+      ["Prompts", String(session.promptHistory.length)],
+      ["Usage", `input=${session.usage.inputTokens} output=${session.usage.outputTokens}`],
+      ["Path", sessionPath(config, session)]
+    ])
+  ].join("\n");
 }
 
 export function renderSessions(sessions: PersistedSession[]): string {
   if (sessions.length === 0) {
-    return "No saved sessions.";
+    return "No saved sessions found for this workspace.";
   }
+  const titleCounts = countTitles(sessions);
   return [
-    "Saved sessions:",
+    "Available sessions:",
     "",
-    ...sessions.slice(0, 20).map((session) => {
+    ...sessions.slice(0, 20).map((session, index) => {
+      const metadata = toSessionMetadata(session);
+      const title = disambiguatedTitle(session, titleCounts);
       return [
-        session.sessionId,
-        `updated=${session.updatedAt}`,
-        `messages=${session.messages.length}`,
-        `model=${session.model}`
-      ].join("  ");
+        `${index + 1}. ${title}`,
+        `   updated: ${formatDate(metadata.updatedAt)} · messages: ${metadata.messageCount} · profile: ${metadata.profile ?? "default"} · model: ${metadata.model ?? "unknown"} · id: ${shortId(metadata.id)}`,
+        `   workspace: ${metadata.workspaceRoot}`,
+        metadata.summary ? `   summary: ${metadata.summary}` : undefined
+      ].filter(Boolean).join("\n");
     })
   ].join("\n");
 }
@@ -290,13 +300,44 @@ export function renderRagMatches(matches: RagSearchResult[]): string {
   ].join("\n");
 }
 
+function countTitles(sessions: PersistedSession[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const session of sessions) {
+    const title = session.title ?? session.sessionId;
+    counts.set(title, (counts.get(title) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function disambiguatedTitle(session: PersistedSession, counts: Map<string, number>): string {
+  const title = session.title ?? session.sessionId;
+  if ((counts.get(title) ?? 0) <= 1) {
+    return title;
+  }
+  return `${title} (${formatDate(session.updatedAt)} · ${shortId(session.sessionId)})`;
+}
+
+function shortId(value: string): string {
+  return value.length <= 8 ? value : value.slice(0, 8);
+}
+
+function formatDate(value: string): string {
+  return value.slice(0, 16).replace("T", " ");
+}
+
 function renderRows(rows: Array<[string, string]>): string {
   const width = Math.max(...rows.map(([key]) => key.length));
   return rows.map(([key, value]) => `${key.padEnd(width)}  ${value}`).join("\n");
 }
 
 function sessionPath(config: RuntimeConfig, session: PersistedSession): string {
-  return path.join(config.workspaceRoot, ".code-agent", "sessions", `${session.sessionId}.json`);
+  return path.join(
+    config.workspaceRoot,
+    ".code-agent",
+    "sessions",
+    workspaceFingerprint(session.workspaceRoot),
+    `${session.sessionId}.json`
+  );
 }
 
 function indent(value: string): string {
